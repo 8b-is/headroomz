@@ -434,7 +434,7 @@ def test_resolution_records_the_advertised_host(monkeypatch: pytest.MonkeyPatch)
     monkeypatch.setattr(
         copilot_auth,
         "iter_oauth_token_candidates",
-        lambda: [
+        lambda **kwargs: [
             copilot_auth.CopilotTokenCandidate(
                 token="gho-oauth",
                 source="headroom-copilot-auth:/tmp/copilot_auth.json",
