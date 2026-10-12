@@ -550,3 +550,34 @@ def test_streaming_parser_reads_cache_usage_sent_only_in_message_delta() -> None
     assert usage["cache_read_input_tokens"] == 2802
     assert usage["input_tokens"] == 1
     assert usage["output_tokens"] == 5
+
+
+def test_streaming_parser_reads_ttl_buckets_sent_only_in_message_delta() -> None:
+    # One-hour cache writes reported only in message_delta must stay one-hour,
+    # or the cost tracker prices them as five-minute writes.
+    from headroom.proxy.server import HeadroomProxy, ProxyConfig
+
+    proxy = HeadroomProxy(
+        ProxyConfig(
+            optimize=False,
+            cache_enabled=False,
+            rate_limit_enabled=False,
+            cost_tracking_enabled=False,
+            log_requests=False,
+            ccr_inject_tool=False,
+            ccr_handle_responses=False,
+            ccr_context_tracking=False,
+        )
+    )
+    chunk = (
+        b'data: {"type":"message_start","message":{"usage":{"input_tokens":0,'
+        b'"cache_creation_input_tokens":0}}}\n\n'
+        b'data: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":'
+        b'{"input_tokens":5,"output_tokens":2,"cache_creation_input_tokens":1000,'
+        b'"cache_creation":{"ephemeral_5m_input_tokens":0,"ephemeral_1h_input_tokens":1000}}}\n\n'
+    )
+    usage = proxy._parse_sse_usage_from_buffer({"sse_buffer": bytearray(chunk)}, "anthropic")
+
+    assert usage["cache_creation_input_tokens"] == 1000
+    assert usage["cache_creation_ephemeral_1h_input_tokens"] == 1000
+    assert usage["cache_creation_ephemeral_5m_input_tokens"] == 0
