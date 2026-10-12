@@ -151,9 +151,6 @@ from headroom.providers.copilot import (
     detect_running_proxy_backend as _copilot_detect_running_proxy_backend,
 )
 from headroom.providers.copilot import (
-    ensure_loopback_no_proxy as _ensure_loopback_no_proxy,
-)
-from headroom.providers.copilot import (
     is_auto_model as _is_auto_model,
 )
 from headroom.providers.copilot import (
