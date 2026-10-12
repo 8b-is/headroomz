@@ -372,6 +372,19 @@ class StreamingMixin:
                     delta_usage = _sse_dict(data.get("usage"))
                     if delta_usage:
                         usage_found["output_tokens"] = delta_usage.get("output_tokens", 0)
+                        # Usage here is cumulative. Some Anthropic-compatible
+                        # upstreams (Fireworks) send zeros in message_start and
+                        # the real input and cache counts only here; without
+                        # them the prefix tracker sees no cache and freezes
+                        # nothing.
+                        for key in (
+                            "input_tokens",
+                            "cache_read_input_tokens",
+                            "cache_creation_input_tokens",
+                        ):
+                            value = usage_int(delta_usage.get(key))
+                            if value > usage_int(usage_found.get(key)):
+                                usage_found[key] = value
 
             elif provider == "openai":
                 chunk_usage = data.get("usage")
