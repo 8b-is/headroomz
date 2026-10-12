@@ -163,6 +163,7 @@ def create_memory_server(db_path: str, user_id: str = "default") -> Server:
     # at the end of this factory once the handler closures below exist.
     _backend: LocalBackend | None = None
     _init_task: asyncio.Task[LocalBackend] | None = None
+    _close_lock = asyncio.Lock()
 
     async def _init_backend() -> LocalBackend:
         """Initialize backend with ONNX embedder (fast, no PyTorch)."""
@@ -226,6 +227,26 @@ def create_memory_server(db_path: str, user_id: str = "default") -> Server:
                 _init_task = None
             raise
 
+    async def _close_backend() -> None:
+        """Cancel backend initialization and close any initialized backend."""
+        nonlocal _backend, _init_task
+        async with _close_lock:
+            init_task = _init_task
+            if init_task is not None:
+                if not init_task.done():
+                    init_task.cancel()
+                await asyncio.gather(init_task, return_exceptions=True)
+                if _init_task is init_task:
+                    _init_task = None
+
+            backend = _backend
+            _backend = None
+            if backend is not None:
+                try:
+                    await backend.close()
+                except Exception as cleanup_error:
+                    logger.warning("Memory MCP: failed backend cleanup: %s", cleanup_error)
+
     async def on_list_tools(ctx: Any, params: Any = None) -> ListToolsResult:
         # Kick off background init on first list_tools (called at MCP handshake)
         if _backend is None:
@@ -248,11 +269,13 @@ def create_memory_server(db_path: str, user_id: str = "default") -> Server:
 
         return CallToolResult(content=list(content))
 
-    return Server(
+    server = Server(
         "headroom-memory",
         on_list_tools=on_list_tools,
         on_call_tool=on_call_tool,
     )
+    server._headroom_close = _close_backend  # type: ignore[attr-defined]
+    return server
 
 
 async def _handle_search(
@@ -366,8 +389,13 @@ async def _handle_save(
 
 async def _run(db_path: str, user_id: str) -> None:
     server = create_memory_server(db_path, user_id)
-    async with stdio_server() as (read_stream, write_stream):
-        await server.run(read_stream, write_stream, server.create_initialization_options())
+    try:
+        async with stdio_server() as (read_stream, write_stream):
+            await server.run(read_stream, write_stream, server.create_initialization_options())
+    finally:
+        close_backend = getattr(server, "_headroom_close", None)
+        if close_backend is not None:
+            await close_backend()
 
 
 def _memory_mcp_startup_context(
