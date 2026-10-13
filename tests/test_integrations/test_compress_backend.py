@@ -5,6 +5,8 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import threading
+from http.server import BaseHTTPRequestHandler, HTTPServer
 
 import httpx
 import pytest
@@ -72,6 +74,58 @@ _API_URLS = {
     # %50 is "P": the encoded form must not slip through either.
     "encoded-path": ("https://cloud.test/bot%50RIVATE_PATH_CANARY", "https://cloud.test/<path>"),
 }
+
+
+@pytest.mark.parametrize("kind", ["asgi", "litellm"])
+def test_real_cloud_error_media_type_cannot_echo_credentials(kind, monkeypatch) -> None:
+    canary = "PRIVATE_CREDENTIAL_CANARY"
+    body = b"service error"
+    received = []
+
+    class ErrorServer(BaseHTTPRequestHandler):
+        def do_POST(self):
+            received.append(json.loads(self.rfile.read(int(self.headers["Content-Length"]))))
+            self.send_response(503)
+            self.send_header("Content-Type", f"text/{canary}")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, *args):
+            pass
+
+    monkeypatch.delenv("HEADROOM_OFFLINE", raising=False)
+    monkeypatch.delenv("HEADROOM_DEBUG_DUMP", raising=False)
+    with HTTPServer(("127.0.0.1", 0), ErrorServer) as server:
+        worker = threading.Thread(target=server.serve_forever, daemon=True)
+        worker.start()
+        api_url = f"http://127.0.0.1:{server.server_port}"
+        integration = CompressionMiddleware if kind == "asgi" else HeadroomCallback
+        kwargs = {"app": None} if kind == "asgi" else {}
+        instance = integration(api_key=_KEY_CANARY, api_url=api_url, **kwargs)
+        handler = _Records()
+        monkeypatch.setattr(instance._log, "level", logging.DEBUG)
+        monkeypatch.setattr(instance._log, "disabled", False)
+        instance._log.addHandler(handler)
+
+        async def request():
+            try:
+                return await instance._cloud_compress(_MESSAGES, "gpt-4o")
+            finally:
+                if instance._client is not None:
+                    await instance._client.aclose()
+
+        try:
+            assert asyncio.run(request()) is None
+        finally:
+            instance._log.removeHandler(handler)
+            server.shutdown()
+            worker.join(timeout=5)
+    assert received[0]["messages"] == _MESSAGES
+    records = [logging.Formatter().format(record) for record in handler.records]
+    assert any("HTTP 503" in record for record in records)
+    assert any(f"{len(body)} bytes" in record for record in records)
+    assert all(canary.lower() not in record.lower() for record in records)
 
 
 @pytest.mark.parametrize("kind", ["asgi", "litellm"])

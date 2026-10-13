@@ -13,7 +13,6 @@ from __future__ import annotations
 import json
 import logging
 import os
-import re
 from typing import Any
 
 from headroom.log_safety import redact_url
@@ -23,7 +22,15 @@ _DEFAULT_CLOUD_URL = "https://api.headroomlabs.ai"
 _DEFAULT_MODEL = "claude-sonnet-4-5-20250929"
 
 
-_MEDIA_TYPE_RE = re.compile(r"[A-Za-z0-9!#$&^_.+-]{1,64}/[A-Za-z0-9!#$&^_.+-]{1,64}")
+_KNOWN_MEDIA_TYPES = frozenset(
+    {
+        "application/json",
+        "application/problem+json",
+        "application/octet-stream",
+        "text/plain",
+        "text/html",
+    }
+)
 
 
 def _media_type(content_type: str) -> str:
@@ -32,8 +39,9 @@ def _media_type(content_type: str) -> str:
     Parameters and anything that is not a plain media type are dropped, so an
     error response cannot smuggle echoed content into the log through a header.
     """
-    media = content_type.split(";", 1)[0].strip()
-    return media.lower() if _MEDIA_TYPE_RE.fullmatch(media) else "<other>"
+    # Valid type/subtype syntax can still contain echoed private content.
+    media = content_type.split(";", 1)[0].strip().lower()
+    return media if media in _KNOWN_MEDIA_TYPES else "<other>"
 
 
 class CompressBackend:
