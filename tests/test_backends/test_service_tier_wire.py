@@ -86,6 +86,26 @@ async def test_real_sdk_puts_service_tier_on_the_provider_request(
                 )
                 events = [event async for event in method(body, {})]
                 assert events
+                if wire_format == "anthropic":
+                    assert all(event.event_type != "error" for event in events)
+                    assert events[-1].event_type == "message_stop"
+                    assert any(
+                        event.data.get("delta", {}).get("text") == "ok"
+                        for event in events
+                    )
+                else:
+                    chunks = [
+                        json.loads(event.removeprefix("data: ").strip())
+                        for event in events
+                        if event.strip() != "data: [DONE]"
+                    ]
+                    assert all("error" not in chunk for chunk in chunks)
+                    assert events[-1].strip() == "data: [DONE]"
+                    assert any(
+                        choice.get("delta", {}).get("content") == "ok"
+                        for chunk in chunks
+                        for choice in chunk.get("choices", [])
+                    )
             else:
                 method = (
                     backend.send_message
