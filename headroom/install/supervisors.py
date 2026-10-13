@@ -52,42 +52,29 @@ def _is_windows() -> bool:
 
 
 def _write_private_text(path: Path, data: str, mode: int) -> None:
-    """Write ``data`` to ``path`` without ever exposing it at the umask.
+    """Atomically replace a secret-bearing runner with a private new inode.
 
-    The runner scripts ``export`` every entry of ``manifest.base_env`` in
-    cleartext, and ``headroom install --env KEY=VALUE`` is the supported way to
-    put a provider API key there, so these files are secret-bearing. Creating
-    the file with :func:`os.open` and an explicit mode — rather than writing
-    first and chmod'ing after — closes the window in which a world-readable
-    file holding a live API key exists on disk. An existing file is removed
-    first, because ``O_TRUNC`` would keep its old (possibly 0755) mode while the
-    new secrets are written into it; the chmod afterwards still verifies the
-    result.
+    Creating the temporary file exclusively avoids following a replacement
+    hard link. Restrict it before publishing; a failed write, restriction or
+    replacement leaves the previous runner and unrelated files untouched.
     """
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.unlink(missing_ok=True)
-    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, mode)
-    # Newline handling is left at the default so the bytes written match what
-    # `Path.write_text` produced before, on every platform.
-    with os.fdopen(fd, "w", encoding="utf-8") as handle:
-        handle.write(data)
-    if not chmod_owner_only(path, mode) and POSIX_MODES_ENFORCED:
-        # Fail closed. The O_CREAT mode above covers a file we created, but an
-        # existing inode keeps its old mode through O_TRUNC, so on this path the
-        # chmod is the only thing narrowing a 0755 script written by an earlier
-        # version -- and the script `export`s every entry of `manifest.base_env`
-        # in cleartext, which is where `headroom install --env` puts a provider
-        # API key. Continuing would leave that key readable by every local user
-        # while the installer reported success. Remove it rather than hand back
-        # a half-protected secret; on platforms that do not enforce POSIX modes
-        # at all this cannot trigger, and SECURITY.md says so.
-        path.unlink(missing_ok=True)
-        raise click.ClickException(
-            f"Refusing to write {path}: its permissions could not be restricted "
-            f"to {oct(mode)}, and the file carries any API key passed to "
-            f"`headroom install --env` in cleartext. Check the filesystem's "
-            f"mount options and ownership, then re-run."
-        )
+    fd, name = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=path.parent)
+    temporary = Path(name)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            if hasattr(os, "fchmod"):
+                os.fchmod(handle.fileno(), mode)
+            handle.write(data)
+        if not chmod_owner_only(temporary, mode) and POSIX_MODES_ENFORCED:
+            raise click.ClickException(
+                f"Refusing to write {path}: permissions could not be restricted "
+                f"to {oct(mode)}, and the file carries any API key passed via "
+                f"`headroom install --env`. Fix directory permissions and re-run."
+            )
+        os.replace(temporary, path)
+    finally:
+        temporary.unlink(missing_ok=True)
 
 
 def _validated_env_items(env: dict[str, str] | None) -> list[tuple[str, str]]:

@@ -14,6 +14,7 @@ from __future__ import annotations
 import logging
 import os
 import stat
+from pathlib import Path
 
 import click
 import pytest
@@ -76,6 +77,49 @@ class TestChmodOwnerOnlyReportsItsResult:
 
 
 class TestRunnerScriptsFailClosed:
+    def test_replacement_never_truncates_a_racing_hard_link(self, tmp_path, monkeypatch):
+        target = tmp_path / "run-headroom.sh"
+        unrelated = tmp_path / "unrelated.txt"
+        unrelated.write_text("unrelated original")
+        original_open = os.open
+
+        def racing_open(path, flags, *args, **kwargs):
+            if Path(path) == target and not target.exists():
+                os.link(unrelated, target)
+            return original_open(path, flags, *args, **kwargs)
+
+        monkeypatch.setattr(os, "open", racing_open)
+        supervisors._write_private_text(target, "export KEY=fake-secret\n", OWNER_ONLY_SCRIPT_MODE)
+        assert unrelated.read_text() == "unrelated original"
+        assert target.read_text() == "export KEY=fake-secret\n"
+
+    def test_failed_restriction_preserves_the_previous_runner(self, tmp_path, monkeypatch):
+        target = tmp_path / "run-headroom.sh"
+        target.write_text("previous runner")
+        monkeypatch.setattr(supervisors, "POSIX_MODES_ENFORCED", True)
+        monkeypatch.setattr(supervisors, "chmod_owner_only", lambda *_args: False)
+        with pytest.raises(click.ClickException):
+            supervisors._write_private_text(
+                target, "export KEY=fake-secret\n", OWNER_ONLY_SCRIPT_MODE
+            )
+        assert target.read_text() == "previous runner"
+        assert list(tmp_path.iterdir()) == [target]
+
+    def test_failed_atomic_replace_preserves_the_previous_runner(self, tmp_path, monkeypatch):
+        target = tmp_path / "run-headroom.sh"
+        target.write_text("previous runner")
+
+        def reject_replace(*args):
+            raise PermissionError("replacement denied")
+
+        monkeypatch.setattr(os, "replace", reject_replace)
+        with pytest.raises(PermissionError):
+            supervisors._write_private_text(
+                target, "export KEY=fake-secret\n", OWNER_ONLY_SCRIPT_MODE
+            )
+        assert target.read_text() == "previous runner"
+        assert list(tmp_path.iterdir()) == [target]
+
     def test_refuses_to_leave_a_script_it_could_not_restrict(self, tmp_path, monkeypatch):
         """A runner script ``export``s the API key in cleartext, so a
         half-protected one must not survive the call."""
