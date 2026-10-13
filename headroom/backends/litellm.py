@@ -1396,6 +1396,8 @@ class LiteLLMBackend(Backend):
                 "stream": True,
             }
 
+            if "service_tier" in body:
+                kwargs["service_tier"] = body["service_tier"]
             if "max_tokens" in body:
                 kwargs["max_tokens"] = body["max_tokens"]
             if "temperature" in body:
