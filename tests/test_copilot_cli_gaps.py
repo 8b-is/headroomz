@@ -198,9 +198,14 @@ def test_probe_stays_unknown_without_any_bundle(tmp_path: Path) -> None:
 # --------------------------------------------------------------------------- #
 # Gap 2: a `copilotUrl` setting outranks COPILOT_API_URL
 # --------------------------------------------------------------------------- #
-def test_copilot_home_honours_override_then_default(tmp_path: Path) -> None:
-    assert copilot_home({"COPILOT_HOME": str(tmp_path / "cfg")}) == tmp_path / "cfg"
-    assert copilot_home({"HOME": str(tmp_path)}) == tmp_path / ".copilot"
+@pytest.mark.parametrize("windows", [False, True])
+def test_copilot_home_honours_override_then_default(tmp_path: Path, windows: bool) -> None:
+    env = {"HOME": str(tmp_path / "posix"), "USERPROFILE": str(tmp_path / "windows")}
+    assert copilot_home({**env, "COPILOT_HOME": str(tmp_path / "cfg")}, windows=windows) == (
+        tmp_path / "cfg"
+    )
+    expected_home = tmp_path / ("windows" if windows else "posix")
+    assert copilot_home(env, windows=windows) == expected_home / ".copilot"
 
 
 def test_read_copilot_url_settings_reports_every_pin(tmp_path: Path) -> None:
@@ -437,7 +442,7 @@ def test_resolution_records_the_advertised_host(monkeypatch: pytest.MonkeyPatch)
     monkeypatch.setattr(
         copilot_auth,
         "iter_oauth_token_candidates",
-        lambda: [
+        lambda **kwargs: [
             copilot_auth.CopilotTokenCandidate(
                 token="gho-oauth",
                 source="headroom-copilot-auth:/tmp/copilot_auth.json",
