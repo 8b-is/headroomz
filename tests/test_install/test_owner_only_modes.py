@@ -93,6 +93,28 @@ class TestRunnerScriptsFailClosed:
         assert unrelated.read_text() == "unrelated original"
         assert target.read_text() == "export KEY=fake-secret\n"
 
+    def test_replacement_does_not_modify_a_link_inserted_before_publish(
+        self, tmp_path, monkeypatch
+    ):
+        target = tmp_path / "run-headroom.sh"
+        target.write_text("previous runner")
+        unrelated = tmp_path / "unrelated.txt"
+        unrelated.write_text("unrelated original")
+        original_replace = os.replace
+        attacked = []
+
+        def racing_replace(source, destination):
+            target.unlink()
+            os.link(unrelated, target)
+            attacked.append(True)
+            return original_replace(source, destination)
+
+        monkeypatch.setattr(os, "replace", racing_replace)
+        supervisors._write_private_text(target, "export KEY=fake-secret\n", OWNER_ONLY_SCRIPT_MODE)
+        assert attacked == [True]
+        assert unrelated.read_text() == "unrelated original"
+        assert target.read_text() == "export KEY=fake-secret\n"
+
     def test_failed_restriction_preserves_the_previous_runner(self, tmp_path, monkeypatch):
         target = tmp_path / "run-headroom.sh"
         target.write_text("previous runner")
