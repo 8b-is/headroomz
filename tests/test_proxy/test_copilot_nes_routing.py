@@ -15,7 +15,6 @@ import pytest
 fastapi = pytest.importorskip("fastapi")
 httpx = pytest.importorskip("httpx")
 
-from fastapi.responses import JSONResponse  # noqa: E402
 from fastapi.testclient import TestClient  # noqa: E402
 
 from headroom import copilot_auth  # noqa: E402
@@ -55,9 +54,16 @@ class _Send:
             request=httpx.Request(method, url),
         )
 
-    async def stream(self, url, headers, body, *args, **kwargs):
-        self.url = url
-        return JSONResponse({"ok": True})
+    async def send_stream(self, request, **kwargs):
+        """Stand in for ``http_client.send``: the streaming arm's wire, after auth."""
+        self.url = str(request.url)
+        self.headers = {k.lower(): v for k, v in request.headers.items()}
+        return httpx.Response(
+            200,
+            headers={"content-type": "text/event-stream"},
+            content=b'data: {"choices":[{"index":0,"delta":{"content":"ok"}}]}\n\ndata: [DONE]\n\n',
+            request=request,
+        )
 
 
 @pytest.fixture(autouse=True)
@@ -99,7 +105,7 @@ def _post(
     with TestClient(create_app(config)) as client:
         proxy = client.app.state.proxy
         proxy._retry_request = send
-        proxy._stream_response = send.stream
+        proxy.http_client.send = send.send_stream
         resp = client.post(
             "/chat/completions",
             json={
@@ -121,10 +127,11 @@ def test_next_edit_models_go_to_the_completions_host_with_copilot_credentials() 
     assert send.headers["authorization"] == f"Bearer {MINTED}"
 
 
-def test_streamed_next_edits_go_to_the_completions_host() -> None:
+def test_streamed_next_edits_go_to_the_completions_host_with_copilot_credentials() -> None:
     send = _post(NES_MODEL, stream=True)
 
     assert send.url == f"{DEFAULT_COMPLETIONS}/chat/completions"
+    assert send.headers["authorization"] == f"Bearer {MINTED}"
 
 
 def test_next_edit_models_follow_the_completions_host_github_advertised() -> None:
@@ -148,6 +155,16 @@ def test_a_ghe_tenant_keeps_its_next_edits_inside_its_deployment() -> None:
 
     assert send.url is not None
     assert send.url.startswith("https://copilot-api.acme.ghe.com/")
+
+
+def test_a_configured_enterprise_deployment_keeps_next_edits_with_a_public_upstream(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("GITHUB_COPILOT_ENTERPRISE_URL", "https://acme.ghe.com")
+
+    send = _post(NES_MODEL, openai_api_url="https://api.githubcopilot.com")
+
+    assert send.url == "https://copilot-api.acme.ghe.com/chat/completions"
 
 
 def test_a_completions_host_target_is_not_moved() -> None:
