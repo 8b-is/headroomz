@@ -197,6 +197,28 @@ class _RaisingClient:
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("op", ["get_memory", "delete_memory"])
+@pytest.mark.parametrize("level", [logging.INFO, logging.DEBUG])
+async def test_malformed_exception_names_cannot_leak_from_memory_operations(
+    op, level, monkeypatch, caplog
+) -> None:
+    error_type = type("PRIVATE_CREDENTIAL_CANARY\nFORGED_LOG_ENTRY", (RuntimeError,), {})
+    adapter = _adapter()
+    adapter._ensure_initialized = AsyncMock()
+    adapter._mem0_client = _RaisingClient(error_type("backend content"))
+    monkeypatch.delenv("HEADROOM_DEBUG_DUMP", raising=False)
+    with caplog.at_level(level, logger="headroom.memory.backends.direct_mem0"):
+        result = await getattr(adapter, op)("m1")
+    assert result is (None if op == "get_memory" else False)
+    assert len([record for record in caplog.records if record.levelno == logging.WARNING]) == 1
+    for record in caplog.records:
+        rendered = logging.Formatter().format(record)
+        assert "PRIVATE_CREDENTIAL_CANARY" not in rendered
+        assert "FORGED_LOG_ENTRY" not in rendered
+        assert "\n" not in rendered
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("op", "exc", "warns"),
     [

@@ -937,7 +937,7 @@ class DirectMem0Adapter:
             logger.warning(
                 "DirectMem0: delete_memory(%s) failed (%s)",
                 safe_id(memory_id),
-                type(e).__name__,
+                safe_id(e),
             )
             if logger.isEnabledFor(logging.DEBUG):
                 logger.debug(
@@ -973,9 +973,7 @@ class DirectMem0Adapter:
                 metadata=result.get("metadata") or {},
             )
         except Exception as e:
-            logger.warning(
-                "DirectMem0: get_memory(%s) failed (%s)", safe_id(memory_id), type(e).__name__
-            )
+            logger.warning("DirectMem0: get_memory(%s) failed (%s)", safe_id(memory_id), safe_id(e))
             if logger.isEnabledFor(logging.DEBUG):
                 logger.debug(
                     "DirectMem0: get_memory(%s) failure: %s",
