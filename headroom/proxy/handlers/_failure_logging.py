@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import logging
 
-from headroom.log_safety import WarnOnce, describe_exception, safe_id
+from headroom.log_safety import WarnOnce, describe_class, describe_exception, safe_id
 
 logger = logging.getLogger("headroom.proxy")
 
@@ -24,8 +24,7 @@ _HOOK_WARNINGS = WarnOnce(256, "failing compression hooks")
 
 
 def _hook_name(hooks: object) -> str:
-    cls = type(hooks)
-    return f"{cls.__module__}.{cls.__qualname__}"
+    return describe_class(type(hooks))
 
 
 def log_hook_failure(
@@ -40,7 +39,7 @@ def log_hook_failure(
     ``outcome`` says what the caller does next, e.g. that it skips compression.
     """
     hook = _hook_name(hooks)
-    first = _HOOK_WARNINGS.first((hook, stage, type(err).__name__), logger)
+    first = _HOOK_WARNINGS.first((type(hooks), stage, type(err).__name__), logger)
     logger.log(
         logging.WARNING if first else logging.DEBUG,
         "[%s] hook %s %s failed; %s: %s%s",

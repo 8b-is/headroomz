@@ -108,6 +108,33 @@ def test_a_suppressed_warning_is_still_emitted_later(capture) -> None:
     assert [w.split()[0] for w in capture.hook_warnings()] == ["[r2]"]
 
 
+@pytest.mark.parametrize("level", [logging.INFO, logging.DEBUG])
+@pytest.mark.parametrize("attribute", ["__module__", "__qualname__"])
+def test_hook_metadata_cannot_disclose_content_or_forge_log_lines(
+    capture, level, attribute
+) -> None:
+    hooks_type = type("UntrustedHook", (), {})
+    setattr(hooks_type, attribute, f"{CONTENT}\nFORGED_LOG_ENTRY")
+    logging.getLogger("headroom.proxy").setLevel(level)
+    for request_id in ("first", "repeat"):
+        log_hook_failure(request_id, "pre_compress", hooks_type(), ValueError("failure"))
+    assert len(capture.hook_warnings()) == 1
+    capture.assert_no_canaries()
+    for record in capture.records:
+        rendered = logging.Formatter().format(record)
+        assert "FORGED_LOG_ENTRY" not in rendered
+        assert "\n" not in rendered
+
+
+def test_invalid_hook_names_keep_separate_warning_budgets(capture) -> None:
+    for name in (f"{CONTENT}\nfirst", f"{CONTENT}\nsecond"):
+        hooks_type = type(name, (), {})
+        log_hook_failure("r1", "pre_compress", hooks_type(), ValueError("failure"))
+        log_hook_failure("r2", "pre_compress", hooks_type(), ValueError("failure"))
+    assert len(capture.hook_warnings()) == 2
+    capture.assert_no_canaries()
+
+
 def test_request_failure_names_the_failure_without_payload(capture) -> None:
     log_request_failure(
         "r1", "Request", _raised(ValueError(CONTENT)), provider="anthropic", model="m"
