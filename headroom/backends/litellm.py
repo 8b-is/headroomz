@@ -46,6 +46,7 @@ _OPENAI_STANDARD_PARAMS = (
     # reasoning request routed cross-protocol to a Claude model fails.
     "reasoning_effort",
     "max_completion_tokens",
+    "service_tier",
 )
 
 _OPENAI_CONSUMED_BODY_KEYS = frozenset(
