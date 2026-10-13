@@ -23,6 +23,22 @@ logger = logging.getLogger("headroom.proxy")
 _HOOK_WARNINGS = WarnOnce(256, "failing compression hooks")
 
 
+class _HookClassKey:
+    """Use class identity without running plugin metaclass hashing/equality.
+
+    Retaining the class for the bounded warning window also prevents id reuse.
+    """
+
+    def __init__(self, cls: type) -> None:
+        self.cls = cls
+
+    def __hash__(self) -> int:
+        return id(self.cls)
+
+    def __eq__(self, other: object) -> bool:
+        return type(other) is _HookClassKey and self.cls is other.cls
+
+
 def _hook_name(hooks: object) -> str:
     return describe_class(type(hooks))
 
@@ -39,7 +55,7 @@ def log_hook_failure(
     ``outcome`` says what the caller does next, e.g. that it skips compression.
     """
     hook = _hook_name(hooks)
-    first = _HOOK_WARNINGS.first((type(hooks), stage, type(err).__name__), logger)
+    first = _HOOK_WARNINGS.first((_HookClassKey(type(hooks)), stage, type(err).__name__), logger)
     logger.log(
         logging.WARNING if first else logging.DEBUG,
         "[%s] hook %s %s failed; %s: %s%s",

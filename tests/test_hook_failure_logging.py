@@ -135,6 +135,23 @@ def test_invalid_hook_names_keep_separate_warning_budgets(capture) -> None:
     capture.assert_no_canaries()
 
 
+def test_hook_warning_keys_do_not_run_metaclass_hash_or_equality(capture) -> None:
+    class PluginMeta(type):
+        def __hash__(cls):
+            raise AssertionError("plugin hash executed")
+
+        def __eq__(cls, other):
+            raise AssertionError("plugin equality executed")
+
+    class PluginHook(metaclass=PluginMeta):
+        pass
+
+    for request_id in ("first", "repeat"):
+        log_hook_failure(request_id, "pre_compress", PluginHook(), ValueError("failure"))
+    assert len(capture.hook_warnings()) == 1
+    capture.assert_no_canaries()
+
+
 def test_request_failure_names_the_failure_without_payload(capture) -> None:
     log_request_failure(
         "r1", "Request", _raised(ValueError(CONTENT)), provider="anthropic", model="m"
