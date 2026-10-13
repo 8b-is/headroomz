@@ -22,7 +22,7 @@ import asyncio
 import os
 import re
 from pathlib import Path
-from urllib.parse import urlparse
+from urllib.parse import urlparse, urlsplit, urlunsplit
 
 import httpx
 
@@ -40,6 +40,12 @@ PROBE = ["gpt-4o", "gpt-5.5", "claude-sonnet-4.6"]
 # GitHub token TYPE prefixes — these are not secret (the random bytes after are).
 TOKEN_PREFIXES = ("github_pat_", "gho_", "ghu_", "ghs_", "ghp_", "tid_")
 _TOKEN_RE = re.compile(r"\b(" + "|".join(TOKEN_PREFIXES) + r")[^\s\"',;]+")
+
+
+def _endpoint_url(api_url: str, path: str) -> str:
+    """Append the API route before the base URL's query and fragment."""
+    parts = urlsplit(api_url)
+    return urlunsplit(parts._replace(path=f"{parts.path.rstrip('/')}/{path.lstrip('/')}"))
 
 
 def redact(t: str | None) -> str:
@@ -137,7 +143,9 @@ except Exception as e:  # noqa: BLE001
 # [5] Exact OUTBOUND request Headroom would forward (capture) ---------------
 head("[5] OUTBOUND capture — exactly what Headroom forwards to GitHub")
 try:
-    sample = asyncio.run(copilot_auth.apply_copilot_api_auth({}, url=f"{api_url}/chat/completions"))
+    sample = asyncio.run(
+        copilot_auth.apply_copilot_api_auth({}, url=_endpoint_url(api_url, "chat/completions"))
+    )
     auth = next((v for k, v in sample.items() if k.lower() == "authorization"), "")
     sch, _, raw = auth.partition(" ")
     print(f"    POST {display_url(api_url)}/chat/completions")
@@ -162,7 +170,7 @@ head("[6] /models catalog (what the picker SHOWS)")
 if api_token:
     try:
         with httpx.Client(timeout=20) as c:
-            r = c.get(f"{api_url}/models", headers=hdr)
+            r = c.get(_endpoint_url(api_url, "models"), headers=hdr)
         if r.status_code == 403:
             print(
                 "    http=403 → SSO authorization likely required (authorize the org in your IdP / re-login)"
@@ -184,7 +192,7 @@ if api_token:
 
     def post(path: str, payload: dict) -> httpx.Response:
         with httpx.Client(timeout=30) as c:
-            return c.post(f"{api_url}/{path}", headers=hdr, json=payload)
+            return c.post(_endpoint_url(api_url, path), headers=hdr, json=payload)
 
     for m in PROBE:
         try:
@@ -221,7 +229,7 @@ try:
     resolved = asyncio.run(
         copilot_auth.apply_copilot_api_auth(
             {"authorization": f"Bearer {sim}", "x-api-key": "sk-should-drop"},
-            url=f"{api_url}/chat/completions",
+            url=_endpoint_url(api_url, "chat/completions"),
         )
     )
     fwd = next((v for k, v in resolved.items() if k.lower() == "authorization"), "")
@@ -269,11 +277,9 @@ if sso:
     print("    → 403 seen: SSO authorization needed — authorize the org via your IdP, then re-run.")
 if any(sc == 400 for sc in results.values()):
     print(
-        "    → remaining 400s are an upstream GitHub ENTITLEMENT/policy limit, NOT a Headroom bug."
+        "  → HTTP 400 is ambiguous: request/model compatibility or policy. Inspect the per-model errors above."
     )
-    print(
-        "      Unlock = Copilot Pro/Business/Enterprise + admin enables the models in Copilot policy."
-    )
+    print("     Check request/model compatibility before changing account entitlements or policy.")
 if any(sc == 200 for m, sc in results.items() if m != "gpt-4o"):
     print(
         "    → a premium model RUNS on this seat — now verify it also flows THROUGH `headroom wrap copilot`."

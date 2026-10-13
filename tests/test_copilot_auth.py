@@ -1575,8 +1575,8 @@ def test_capture_outbound_drops_url_credentials(
         ("https://api.example.test/v1;PARAM_SECRET", "https://api.example.test/v1"),
         ("tenant.ghe.com", "tenant.ghe.com"),
         ("u:USERINFO_SECRET@tenant.ghe.com", "tenant.ghe.com"),
-        ("https://[::1]:8443/x", "https://[::1]:8443/x"),
-        ("https://api.example.test:99999/x", "https://api.example.test/x"),
+        ("https://[::1]:8443/x", "https://[::1]:8443/<path>"),
+        ("https://api.example.test:99999/x", "https://api.example.test/<path>"),
         ("https://[bad?QUERY_SECRET", "(unparseable URL)"),
         ("", ""),
         (None, ""),
@@ -1589,7 +1589,7 @@ def test_display_url_drops_credentials_and_never_raises(raw: object, shown: str)
 def test_scrub_urls_sanitizes_urls_inside_text() -> None:
     msg = "connect failed for https://u:USERINFO_SECRET@h.test/p?t=QUERY_SECRET#F_SECRET (timeout)"
     out = copilot_auth.scrub_urls(msg)
-    assert out == "connect failed for https://h.test/p (timeout)"
+    assert out == "connect failed for https://h.test/<path> (timeout)"
 
 
 def test_capture_outbound_disabled_by_default(

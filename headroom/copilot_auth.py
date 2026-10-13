@@ -27,6 +27,7 @@ from headroom import paths
 from headroom._subprocess import run
 from headroom.copilot_linux_secret import read_copilot_oauth_token as read_linux_secret_token
 from headroom.copilot_macos_keychain import read_copilot_oauth_token as read_macos_keychain_token
+from headroom.log_safety import describe_exception, redact_url
 from headroom.offline import guard_egress
 from headroom.proxy import ssl_context as proxy_ssl_context
 
@@ -1649,7 +1650,20 @@ def _token_kind(token: str) -> str:
     return "unknown" if t else "empty"
 
 
-_URL_IN_TEXT_RE = re.compile(r"\b[A-Za-z][A-Za-z0-9+.-]*://[^\s\"'<>]+")
+_URL_IN_TEXT_RE = re.compile(r"\b[A-Za-z][A-Za-z0-9+.-]*://[^\s<>]+")
+_SAFE_DISPLAY_PATHS = frozenset(
+    {
+        "",
+        "/",
+        "/v1",
+        "/models",
+        "/responses",
+        "/chat/completions",
+        "/v1/models",
+        "/v1/responses",
+        "/v1/chat/completions",
+    }
+)
 
 
 def _url_display_parts(url: object) -> tuple[str, str, str]:
@@ -1663,16 +1677,24 @@ def _url_display_parts(url: object) -> tuple[str, str, str]:
 
     text = str(url or "").strip()
     parsed = urlparse(text if "://" in text or text.startswith("//") else f"//{text}")
-    host = parsed.hostname or ""
-    if ":" in host:  # IPv6 literal
-        host = f"[{host}]"
+    # Only fixed API routes can be shown. Strip every other path even when
+    # general content dumps are enabled: this capture promises secret-free metadata.
+    raw_host = parsed.hostname or ""
+    if ":" in raw_host:
+        raw_host = f"[{raw_host}]"
     try:
-        port = parsed.port
-    except ValueError:  # out-of-range or non-numeric port: show none of it
-        port = None
-    if port is not None and host:
-        host = f"{host}:{port}"
-    return parsed.scheme, host, parsed.path
+        raw_port = parsed.port
+    except ValueError:
+        raw_port = None
+    if raw_port is not None and raw_host:
+        raw_host = f"{raw_host}:{raw_port}"
+    safe_origin = redact_url(f"{parsed.scheme or 'https'}://{raw_host}/")
+    safe_parts = urlparse(safe_origin)
+    host = safe_parts.netloc
+    if not host:
+        raise ValueError("Invalid diagnostic URL origin")
+    path = parsed.path if parsed.path in _SAFE_DISPLAY_PATHS else "/<path>"
+    return safe_parts.scheme if parsed.scheme else "", host, path
 
 
 def display_url(url: object) -> str:
@@ -1760,7 +1782,7 @@ def _maybe_capture_outbound(url: str, headers: dict[str, str]) -> None:
             token_label,
         )
     except Exception as exc:  # noqa: BLE001
-        logger.debug("copilot outbound capture failed: %s", exc)
+        logger.debug("copilot outbound capture failed: %s", describe_exception(exc))
 
 
 def _is_managed_copilot_seeded_bearer(token: str) -> bool:

@@ -17,6 +17,33 @@ KIT = Path(__file__).resolve().parents[1] / "tools" / "copilot-test"
 LEAKED = "gho_ECHOEDSECRET123"
 
 
+@pytest.mark.parametrize("path", ["/botPRIVATE_PATH_CANARY/v1", "/bot%50RIVATE_PATH_CANARY/v1"])
+@pytest.mark.parametrize("full_content", [False, True])
+def test_outbound_capture_never_logs_path_credentials(
+    path, full_content, tmp_path, monkeypatch, caplog
+):
+    capture = tmp_path / "capture.jsonl"
+    monkeypatch.setenv("HEADROOM_COPILOT_DEBUG_OUTBOUND", "1")
+    monkeypatch.setenv("HEADROOM_COPILOT_DEBUG_OUTBOUND_FILE", str(capture))
+    if full_content:
+        monkeypatch.setenv("HEADROOM_DEBUG_DUMP", "full")
+    else:
+        monkeypatch.delenv("HEADROOM_DEBUG_DUMP", raising=False)
+    url = "https://api.example.test" + path
+    with caplog.at_level("DEBUG", logger=copilot_auth.logger.name):
+        copilot_auth._maybe_capture_outbound(url, {"Authorization": "Bearer gho_fake"})
+    record = json.loads(capture.read_text().splitlines()[0])
+    assert record["host"] == "api.example.test"
+    assert record["url"] == "https://api.example.test/<path>"
+    assert "PRIVATE_PATH_CANARY" not in caplog.text
+    assert "%50RIVATE_PATH_CANARY" not in caplog.text
+
+
+def test_quoted_url_credentials_do_not_escape_diagnostic_redaction():
+    text = 'request failed: https://api.example.test/v1?key="PRIVATE_QUERY_CANARY"'
+    assert "PRIVATE_QUERY_CANARY" not in copilot_auth.scrub_urls(text)
+
+
 class _FakeProvider:
     def __init__(self, token: str | None, api_url: str = "https://api.example.test") -> None:
         self.token = token
@@ -74,6 +101,14 @@ def _run_doctor(
     monkeypatch.setattr(httpx, "Client", _FakeClient)
     runpy.run_path(str(KIT / "copilot_doctor.py"), run_name="__main__")
     return _FakeClient.requests
+
+
+def test_doctor_does_not_classify_every_bad_request_as_entitlement(monkeypatch, capsys) -> None:
+    _run_doctor(monkeypatch, token="tid_FAKE")
+    output = capsys.readouterr().out
+    assert "400" in output
+    assert "an upstream GitHub ENTITLEMENT/policy limit" not in output
+    assert "Inspect the per-model errors" in output
 
 
 def test_doctor_probes_with_the_token_integration_id(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -165,7 +200,13 @@ def test_doctor_output_drops_url_credentials(
     assert "API host            : https://api.example.test:8443/v1" in out
     # Requests still go to the original, unsanitized endpoint.
     assert requests
-    assert all(u.startswith(url) for u, _ in requests)
+    base = urlsplit(url)
+    for request_url, _headers in requests:
+        target = urlsplit(request_url)
+        assert target.netloc == base.netloc
+        assert target.query == base.query
+        assert target.fragment == base.fragment
+        assert target.path in {"/v1/models", "/v1/chat/completions", "/v1/responses"}
 
 
 class _FakeProc:
