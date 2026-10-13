@@ -44,7 +44,7 @@ def persist_rust_ccr_entry(original: str, compressed: str, cache_key: str, *, so
         logger.warning(
             "CCR store write failed (%s, %s); cache_key %s remains in-marker only",
             source,
-            type(e).__name__,
+            describe_exception(e),
             cache_key,
         )
         logger.debug("CCR store write failure detail: %s", describe_exception(e))

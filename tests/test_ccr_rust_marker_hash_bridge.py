@@ -17,6 +17,7 @@ exact hash the marker embeds.
 from __future__ import annotations
 
 import hashlib
+import logging
 
 import pytest
 
@@ -32,6 +33,30 @@ def _fresh_store():
     reset_compression_store()
     yield
     reset_compression_store()
+
+
+@pytest.mark.parametrize("level", [logging.INFO, logging.DEBUG])
+def test_persist_warning_rejects_malformed_exception_names(monkeypatch, caplog, level) -> None:
+    from headroom.cache import compression_store
+    from headroom.transforms import base
+
+    canary = "PRIVATE_CREDENTIAL_CANARY\nFORGED_LOG_ENTRY"
+    error_type = type(canary, (RuntimeError,), {})
+
+    class BrokenStore:
+        def store(self, original, compressed, **kwargs):
+            raise error_type("untrusted backend text")
+
+    monkeypatch.delenv("HEADROOM_DEBUG_DUMP", raising=False)
+    monkeypatch.setattr(compression_store, "get_compression_store", lambda: BrokenStore())
+    with caplog.at_level(level, logger=base.logger.name):
+        assert persist_rust_ccr_entry("original", "compressed", "a" * 24, source="diff") is None
+    assert len([record for record in caplog.records if record.levelno == logging.WARNING]) == 1
+    for record in caplog.records:
+        rendered = logging.Formatter().format(record)
+        assert "PRIVATE_CREDENTIAL_CANARY" not in rendered
+        assert "FORGED_LOG_ENTRY" not in rendered
+        assert "\n" not in rendered
 
 
 def _rust_marker_key(original: str) -> str:
@@ -115,7 +140,7 @@ def test_persist_failure_logs_no_exception_text_at_any_level(
 
     warnings = [r for r in records if r.levelno == logging.WARNING]
     assert len(warnings) == 1
-    assert "(diff, RuntimeError)" in warnings[0].getMessage()
+    assert "(diff, RuntimeError" in warnings[0].getMessage()
     assert "a" * 24 in warnings[0].getMessage()
     details = [r for r in records if r.levelno == logging.DEBUG]
     assert len(details) == 1
