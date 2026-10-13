@@ -16,13 +16,13 @@ from headroom.backends import litellm as backend_module  # noqa: E402
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("streaming", [False, True])
-@pytest.mark.parametrize("tier", [None, "default", "flex", "priority"])
+@pytest.mark.parametrize("tier", ["absent", None, "default", "flex", "priority"])
 async def test_anthropic_service_tier_is_forwarded_in_both_paths(
     monkeypatch, streaming, tier
 ) -> None:
     backend = backend_module.LiteLLMBackend(provider="openrouter")
     body = {"model": "claude-sonnet-4-5", "messages": [{"role": "user", "content": "hello"}]}
-    if tier is not None:
+    if tier != "absent":
         body["service_tier"] = tier
     original = deepcopy(body)
 
@@ -48,7 +48,7 @@ async def test_anthropic_service_tier_is_forwarded_in_both_paths(
         assert (await backend.send_message(body, {})).status_code == 200
     completion.assert_awaited_once()
     kwargs = completion.call_args.kwargs
-    if tier is None:
+    if tier == "absent":
         assert "service_tier" not in kwargs
     else:
         assert kwargs["service_tier"] == tier
