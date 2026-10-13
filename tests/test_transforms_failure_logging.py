@@ -134,13 +134,13 @@ def _run_crusher_mirror(monkeypatch: pytest.MonkeyPatch) -> None:
 _PATHS = pytest.mark.parametrize(
     ("logger", "run", "expected"),
     [
-        (compression_batches.logger, _run_batch, "Batch compression failed (RuntimeError)"),
-        (cross_turn_dedup.logger, _run_dedup, "Cross-turn dedup failed (RuntimeError)"),
+        (compression_batches.logger, _run_batch, "Batch compression failed (<RuntimeError>)"),
+        (cross_turn_dedup.logger, _run_dedup, "Cross-turn dedup failed (<RuntimeError>)"),
         (lossless_compaction.logger, _run_lossless, "Lossless compaction (log) failed"),
         (
             kompress_compressor.logger,
             _run_kompress_store,
-            "Kompress CCR store write failed (RuntimeError)",
+            "Kompress CCR store write failed (<RuntimeError>)",
         ),
         (smart_crusher.logger, _run_crusher_mirror, "CCR mirror: store write failed"),
     ],
@@ -176,6 +176,29 @@ def test_failure_logs_no_exception_text_at_any_level(
     assert len(details) == 1
     assert "RuntimeError" in details[0].getMessage()
     assert "caused by ValueError" in details[0].getMessage()
+
+
+@_PATHS
+@pytest.mark.parametrize("level", [logging.INFO, logging.DEBUG])
+def test_malformed_exception_names_cannot_leak_from_fallbacks(
+    capture, monkeypatch, logger, run, expected, level
+) -> None:
+    error_type = type("PRIVATE_CREDENTIAL_CANARY\nFORGED_LOG_ENTRY", (RuntimeError,), {})
+
+    def raise_malformed(*args, **kwargs):
+        raise error_type("untrusted backend content")
+
+    monkeypatch.delenv("HEADROOM_DEBUG_DUMP", raising=False)
+    monkeypatch.setitem(globals(), "_boom", raise_malformed)
+    handler = capture(logger)
+    monkeypatch.setattr(logger, "level", level)
+    run(monkeypatch)
+    assert len([record for record in handler.records if record.levelno == logging.WARNING]) == 1
+    for record in handler.records:
+        rendered = logging.Formatter().format(record)
+        assert "PRIVATE_CREDENTIAL_CANARY" not in rendered
+        assert "FORGED_LOG_ENTRY" not in rendered
+        assert "\n" not in rendered
 
 
 @_PATHS

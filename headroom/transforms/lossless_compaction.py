@@ -33,7 +33,7 @@ __all__ = [
     "compact_lossless",
 ]
 
-from ..log_safety import describe_exception
+from ..log_safety import describe_exception, safe_id
 
 logger = logging.getLogger(__name__)
 
@@ -544,7 +544,7 @@ def compact_lossless(content: str, kind: str) -> str:
         logger.warning(
             "Lossless compaction (%s) failed (%s) on %d chars; leaving content as-is",
             kind,
-            type(e).__name__,
+            safe_id(e),
             len(content),
         )
         if logger.isEnabledFor(logging.DEBUG):

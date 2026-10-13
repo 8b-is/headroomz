@@ -34,7 +34,7 @@ from dataclasses import dataclass
 
 __all__ = ["DedupBlock", "dedup_blocks", "is_prefix_monotonic"]
 
-from ..log_safety import describe_exception
+from ..log_safety import describe_exception, safe_id
 
 logger = logging.getLogger(__name__)
 
@@ -294,7 +294,7 @@ def dedup_blocks(
         # describe_exception keeps only types and code locations.
         logger.warning(
             "Cross-turn dedup failed (%s) on %d blocks; leaving them as-is",
-            type(e).__name__,
+            safe_id(e),
             len(blocks),
         )
         if logger.isEnabledFor(logging.DEBUG):

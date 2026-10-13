@@ -229,7 +229,7 @@ def test_compact_lossless_logs_a_fold_that_raises(monkeypatch) -> None:
 
     assert len(records) == 1
     message = records[0].getMessage()
-    assert "Lossless compaction (log) failed (RuntimeError)" in message
+    assert "Lossless compaction (log) failed (<RuntimeError>)" in message
     # The exception text can quote content, so it stays out of the WARNING.
     assert "fold bug" not in message
 

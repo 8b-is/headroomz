@@ -7,7 +7,7 @@ import logging
 import re
 from dataclasses import dataclass
 
-from ..log_safety import describe_exception
+from ..log_safety import describe_exception, safe_id
 from .compression_units import (
     _CCR_MARKER_RE,
     _LOSSY_UNMARKED_STRATEGIES,
@@ -263,7 +263,7 @@ def compress_batch_with_router(
         # describe_exception keeps only types and code locations.
         logger.warning(
             "Batch compression failed (%s); passing %d units through uncompressed",
-            type(e).__name__,
+            safe_id(e),
             len(batch.entries),
         )
         if logger.isEnabledFor(logging.DEBUG):

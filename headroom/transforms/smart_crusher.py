@@ -53,7 +53,7 @@ from typing import Any
 
 from ..ccr.tool_injection import CCR_TOOL_NAME
 from ..config import CCRConfig, TransformResult, is_tool_excluded
-from ..log_safety import describe_exception
+from ..log_safety import describe_exception, safe_id
 from ..tokenizer import Tokenizer
 from ..utils import compute_short_hash, create_tool_digest_marker, deep_copy_messages
 from .base import Transform
@@ -1200,9 +1200,7 @@ class SmartCrusher(Transform):
         except Exception as e:
             # Store backends can echo the payload in errors, so no level logs it;
             # describe_exception keeps only types and code locations.
-            logger.warning(
-                "CCR mirror: store write failed (%s) for hash %s", type(e).__name__, ccr_hash
-            )
+            logger.warning("CCR mirror: store write failed (%s) for hash %s", safe_id(e), ccr_hash)
             if logger.isEnabledFor(logging.DEBUG):
                 logger.debug("CCR mirror store failure detail: %s", describe_exception(e))
 
