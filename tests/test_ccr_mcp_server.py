@@ -169,7 +169,9 @@ def _read_text(server, file_path: str) -> str:
     ]
 
 
-@pytest.mark.parametrize("how", ["absolute", "dotdot", "symlink"])
+@pytest.mark.parametrize(
+    "how", ["absolute", "dotdot", "symlink", "symlinked_dir", "sibling_prefix", "missing", "loop"]
+)
 def test_read_tool_refuses_files_outside_the_workspace(
     fresh_store, workspace_and_secret, how
 ) -> None:
@@ -178,16 +180,49 @@ def test_read_tool_refuses_files_outside_the_workspace(
         file_path = str(secret)
     elif how == "dotdot":
         file_path = "../private/secret.txt"
-    else:
+    elif how == "symlink":
         (workspace / "link.txt").symlink_to(secret)
         file_path = str(workspace / "link.txt")
+    elif how == "symlinked_dir":
+        (workspace / "d").symlink_to(secret.parent)
+        file_path = "d/secret.txt"
+    elif how == "sibling_prefix":
+        # Same leading characters as the workspace, but a different directory.
+        sibling = workspace.parent / (workspace.name + "-evil")
+        sibling.mkdir()
+        (sibling / "secret.txt").write_text("TOP_SECRET\n", encoding="utf-8")
+        file_path = str(sibling / "secret.txt")
+    elif how == "missing":
+        # Same answer as for a file that exists: no existence oracle.
+        file_path = str(secret.parent / "does-not-exist.txt")
+    else:
+        loop = secret.parent / "loop"
+        loop.symlink_to(loop)
+        file_path = str(loop)
     server = mcp_server.HeadroomMCPServer(check_proxy=False)
 
     text = _read_text(server, file_path)
 
     assert "TOP_SECRET" not in text
-    assert "Outside the allowed read roots" in json.loads(text)["error"]
+    assert "outside the workspace" in json.loads(text)["error"]
     assert server._file_cache == {}
+
+
+@pytest.mark.parametrize("start_in", ["filesystem_root", "home"])
+def test_read_tool_reads_nothing_from_root_or_home_without_roots(
+    fresh_store, workspace_and_secret, monkeypatch, start_in
+) -> None:
+    # GUI hosts launch MCP servers from `/`; a working-directory root there
+    # (or in $HOME) would cover ~/.ssh and everything else.
+    _, secret = workspace_and_secret
+    monkeypatch.setenv("HOME", str(secret.parent))
+    monkeypatch.chdir(secret.parent if start_in == "home" else secret.anchor)
+    server = mcp_server.HeadroomMCPServer(check_proxy=False)
+
+    text = _read_text(server, str(secret))
+
+    assert "TOP_SECRET" not in text
+    assert "HEADROOM_MCP_READ_ROOTS" in json.loads(text)["error"]
 
 
 def test_read_tool_reads_inside_the_workspace(fresh_store, workspace_and_secret) -> None:
@@ -204,7 +239,7 @@ def test_read_tool_reads_under_configured_roots(
     server = mcp_server.HeadroomMCPServer(check_proxy=False)
 
     assert "TOP_SECRET" in _read_text(server, str(secret))
-    assert "Outside the allowed read roots" in _read_text(server, "notes.txt")
+    assert "outside the workspace" in _read_text(server, "notes.txt")
 
 
 def test_mcp_compress_surfaces_unreachable_proxy(fresh_store) -> None:

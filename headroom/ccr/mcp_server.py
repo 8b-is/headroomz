@@ -378,12 +378,21 @@ class SessionStats:
 
 
 def _read_roots() -> list[Path]:
-    """Directories ``headroom_read`` may read under, resolved like the paths checked against them."""
+    """Directories ``headroom_read`` may read under, resolved like the paths checked against them.
+
+    Without HEADROOM_MCP_READ_ROOTS the root is the working directory, unless
+    that is the filesystem root or the home directory (GUI hosts such as
+    Claude Desktop launch MCP servers from ``/``): then nothing is readable
+    until roots are configured.
+    """
     configured = os.environ.get("HEADROOM_MCP_READ_ROOTS", "")
-    entries = [entry for entry in configured.split(os.pathsep) if entry.strip()]
-    if not entries:
-        return [Path.cwd().resolve()]
-    return [Path(entry).expanduser().resolve() for entry in entries]
+    entries = [entry.strip() for entry in configured.split(os.pathsep) if entry.strip()]
+    if entries:
+        return [Path(entry).expanduser().resolve() for entry in entries]
+    cwd = Path.cwd().resolve()
+    if cwd == Path(cwd.anchor) or cwd == Path.home().resolve():
+        return []
+    return [cwd]
 
 
 class HeadroomMCPServer:
@@ -1040,20 +1049,23 @@ class HeadroomMCPServer:
                 )
             ]
 
-        path = Path(file_path).expanduser().resolve()
         # Check the resolved path, so `..` and symlinks cannot leave the roots,
         # and check it before exists() so the tool is not an existence oracle.
-        roots = _read_roots()
-        if not any(path.is_relative_to(root) for root in roots):
+        # A path that cannot be resolved (symlink loop, NUL byte) gets the same
+        # answer, so its error text cannot reveal anything outside either.
+        try:
+            path: Path | None = Path(file_path).expanduser().resolve()
+        except (OSError, RuntimeError, ValueError):
+            path = None
+        if path is None or not any(path.is_relative_to(root) for root in _read_roots()):
             return [
                 TextContent(
                     type="text",
                     text=json.dumps(
                         {
                             "error": (
-                                f"Outside the allowed read roots: {file_path}. "
-                                f"headroom_read only reads files under {', '.join(map(str, roots))}; "
-                                "set HEADROOM_MCP_READ_ROOTS to allow other directories."
+                                f"File is outside the workspace: {file_path}. "
+                                "Ask the user to add its directory to HEADROOM_MCP_READ_ROOTS."
                             )
                         }
                     ),
