@@ -83,7 +83,8 @@ READ_TOOL_NAME = "headroom_read"
 logger = logging.getLogger("headroom.ccr.mcp")
 
 # Feature flag: enable headroom_read tool (file read caching via CCR)
-# Set HEADROOM_MCP_READ=on to enable
+# Set HEADROOM_MCP_READ=on to enable. Reads are confined to the server's working
+# directory, or to the os.pathsep-separated directories in HEADROOM_MCP_READ_ROOTS.
 _READ_ENABLED = os.environ.get("HEADROOM_MCP_READ", "off").lower().strip() in (
     "on",
     "true",
@@ -374,6 +375,15 @@ class SessionStats:
             "estimated_cost_saved_usd": cost_saved,
             "recent_events": self.events[-10:],
         }
+
+
+def _read_roots() -> list[Path]:
+    """Directories ``headroom_read`` may read under, resolved like the paths checked against them."""
+    configured = os.environ.get("HEADROOM_MCP_READ_ROOTS", "")
+    entries = [entry for entry in configured.split(os.pathsep) if entry.strip()]
+    if not entries:
+        return [Path.cwd().resolve()]
+    return [Path(entry).expanduser().resolve() for entry in entries]
 
 
 class HeadroomMCPServer:
@@ -750,7 +760,10 @@ class HeadroomMCPServer:
                             "properties": {
                                 "file_path": {
                                     "type": "string",
-                                    "description": "Absolute path to the file to read.",
+                                    "description": (
+                                        "Path to the file to read, inside the workspace "
+                                        "(the server's working directory or HEADROOM_MCP_READ_ROOTS)."
+                                    ),
                                 },
                                 "fresh": {
                                     "type": "boolean",
@@ -1028,6 +1041,24 @@ class HeadroomMCPServer:
             ]
 
         path = Path(file_path).expanduser().resolve()
+        # Check the resolved path, so `..` and symlinks cannot leave the roots,
+        # and check it before exists() so the tool is not an existence oracle.
+        roots = _read_roots()
+        if not any(path.is_relative_to(root) for root in roots):
+            return [
+                TextContent(
+                    type="text",
+                    text=json.dumps(
+                        {
+                            "error": (
+                                f"Outside the allowed read roots: {file_path}. "
+                                f"headroom_read only reads files under {', '.join(map(str, roots))}; "
+                                "set HEADROOM_MCP_READ_ROOTS to allow other directories."
+                            )
+                        }
+                    ),
+                )
+            ]
         if not path.exists():
             return [
                 TextContent(

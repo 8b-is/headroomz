@@ -110,11 +110,12 @@ def _compact_json(tmp_path):
     return path
 
 
-def test_read_tool_prices_files_in_tokens_not_words(fresh_store, tmp_path) -> None:
+def test_read_tool_prices_files_in_tokens_not_words(fresh_store, tmp_path, monkeypatch) -> None:
     """``headroom_read`` caches a token estimate and stores it as the entry's
     ``original_tokens``. It used to be ``len(content.split())`` — a word count
     in a token field, which is 1 for a single-line JSON document that is
     thousands of tokens long."""
+    monkeypatch.chdir(tmp_path)
     path = _compact_json(tmp_path)
     content = path.read_text(encoding="utf-8")
     server = mcp_server.HeadroomMCPServer(check_proxy=False)
@@ -126,9 +127,10 @@ def test_read_tool_prices_files_in_tokens_not_words(fresh_store, tmp_path) -> No
     assert estimated > len(content.split())
 
 
-def test_read_tool_cache_note_reports_tokens(fresh_store, tmp_path) -> None:
+def test_read_tool_cache_note_reports_tokens(fresh_store, tmp_path, monkeypatch) -> None:
     """The 'already in your context' note is read by the agent to decide whether
     to re-read the file, so its ``~N tokens`` figure has to be a token count."""
+    monkeypatch.chdir(tmp_path)
     path = _compact_json(tmp_path)
     content = path.read_text(encoding="utf-8")
     server = mcp_server.HeadroomMCPServer(check_proxy=False)
@@ -139,6 +141,70 @@ def test_read_tool_cache_note_reports_tokens(fresh_store, tmp_path) -> None:
 
     assert payload["status"] == "cached"
     assert f"~{EstimatingTokenCounter().count_text(content)} tokens" in payload["note"]
+
+
+# --- headroom_read workspace boundary (GHSA-8g49-pg6g-xgrf) -----------------
+# headroom_read is offered to the agent "INSTEAD of the built-in Read tool", so
+# it must not read where the harness's own Read rules would not: it reads only
+# under the server's working directory or HEADROOM_MCP_READ_ROOTS.
+
+
+@pytest.fixture
+def workspace_and_secret(tmp_path, monkeypatch):
+    workspace = tmp_path / "workspace"
+    private = tmp_path / "private"
+    workspace.mkdir()
+    private.mkdir()
+    secret = private / "secret.txt"
+    secret.write_text("TOP_SECRET\n", encoding="utf-8")
+    (workspace / "notes.txt").write_text("hello\n", encoding="utf-8")
+    monkeypatch.chdir(workspace)
+    monkeypatch.delenv("HEADROOM_MCP_READ_ROOTS", raising=False)
+    return workspace, secret
+
+
+def _read_text(server, file_path: str) -> str:
+    return asyncio.run(server._handle_read({"file_path": file_path, "fresh": True}))[0].kwargs[
+        "text"
+    ]
+
+
+@pytest.mark.parametrize("how", ["absolute", "dotdot", "symlink"])
+def test_read_tool_refuses_files_outside_the_workspace(
+    fresh_store, workspace_and_secret, how
+) -> None:
+    workspace, secret = workspace_and_secret
+    if how == "absolute":
+        file_path = str(secret)
+    elif how == "dotdot":
+        file_path = "../private/secret.txt"
+    else:
+        (workspace / "link.txt").symlink_to(secret)
+        file_path = str(workspace / "link.txt")
+    server = mcp_server.HeadroomMCPServer(check_proxy=False)
+
+    text = _read_text(server, file_path)
+
+    assert "TOP_SECRET" not in text
+    assert "Outside the allowed read roots" in json.loads(text)["error"]
+    assert server._file_cache == {}
+
+
+def test_read_tool_reads_inside_the_workspace(fresh_store, workspace_and_secret) -> None:
+    server = mcp_server.HeadroomMCPServer(check_proxy=False)
+
+    assert "hello" in _read_text(server, "notes.txt")
+
+
+def test_read_tool_reads_under_configured_roots(
+    fresh_store, workspace_and_secret, monkeypatch
+) -> None:
+    _, secret = workspace_and_secret
+    monkeypatch.setenv("HEADROOM_MCP_READ_ROOTS", str(secret.parent))
+    server = mcp_server.HeadroomMCPServer(check_proxy=False)
+
+    assert "TOP_SECRET" in _read_text(server, str(secret))
+    assert "Outside the allowed read roots" in _read_text(server, "notes.txt")
 
 
 def test_mcp_compress_surfaces_unreachable_proxy(fresh_store) -> None:
