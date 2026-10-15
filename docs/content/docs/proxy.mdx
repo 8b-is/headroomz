@@ -36,7 +36,7 @@ Separately, an **anonymous usage beacon is on by default** (opt-out). Once a ses
 
 The install id is a random UUID generated on first run and stored in your config directory. It is deliberately not derived from hostname, MAC address, or any hardware property — delete the file and you get a new one.
 
-Disable it with `HEADROOM_BEACON=off`, the `DO_NOT_TRACK=1` convention, or `HEADROOM_OFFLINE=1` (which also disables update checks and license reporting).
+Disable it with `HEADROOM_BEACON=off`, `HEADROOM_TELEMETRY=off` (or `--no-telemetry`), the `DO_NOT_TRACK=1` convention, or `HEADROOM_OFFLINE=1` (which also disables update checks and license reporting). `HEADROOM_BEACON=on` keeps the beacon on even with local stats off. `headroom telemetry` names the setting that turned it off.
 
 ## CLI options
 
