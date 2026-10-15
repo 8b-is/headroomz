@@ -468,6 +468,10 @@ def test_normalize_reads_nested_writes_beside_a_top_level_read() -> None:
         }
     )
     assert (u.cache_read, u.cache_write) == (70, 20)
+    # The Responses total already contains both: billing must not add them.
+    done = gt.complete_outcome(_outcome(), u, status=200, latency_ms=1)
+    assert done.provider_input_tokens == 100
+    assert done.uncached_input_tokens == 10
 
 
 def test_normalize_kong_flat_shape() -> None:

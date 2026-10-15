@@ -342,7 +342,9 @@ def normalize_usage(usage: dict[str, Any]) -> NormalizedUsage:
     # ``input_tokens`` too, so the key name cannot be the discriminator. Keying
     # off Anthropic's cache fields can misread only a relay that mixes the two
     # vocabularies, and then it errs towards not inflating the prompt.
-    input_includes_cache = not (
+    # Responses' ``input_tokens_details`` marks an inclusive total even when a
+    # relay also flattened a top-level read beside it.
+    input_includes_cache = "input_tokens_details" in usage or not (
         "cache_read_input_tokens" in usage or "cache_creation_input_tokens" in usage
     )
     output_tokens = _usage_int(usage, "output_tokens")
