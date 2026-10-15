@@ -102,7 +102,9 @@ class ResponsesCreate:
     looked up by lowercase name. ``connection_id`` names the WebSocket
     connection the frame arrived on (``None`` over HTTP): a
     ``previous_response_id`` chain lives within one connection, so it is the
-    key for anything a hook must hold across a chain's frames.
+    key for anything a hook must hold across a chain's frames. A reconnect
+    gets a new id; Codex's first frame on it replays the full transcript
+    rather than continuing the old chain, so it arrives as a fresh request.
     """
 
     body: Mapping[str, Any]
