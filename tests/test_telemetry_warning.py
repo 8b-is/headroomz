@@ -8,6 +8,7 @@ Covers:
 - /stats endpoint exposes anon_telemetry_shipping flag
 """
 
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import pytest
@@ -57,6 +58,29 @@ def test_telemetry_off_turns_the_beacon_off_and_says_so(monkeypatch, value):
     assert is_beacon_enabled() is False
     output = CliRunner().invoke(main, ["telemetry"]).output
     assert f"Upload beacon:   OFF (HEADROOM_TELEMETRY={value.lower()})" in output
+
+
+def test_buffered_session_is_not_sent_after_telemetry_off(monkeypatch):
+    """A session recorded while the beacon was on must not upload once the
+    operator opts out, at heartbeat/idle close or at exit."""
+    from headroom.telemetry import session as S
+
+    for var in ("HEADROOM_BEACON", "DO_NOT_TRACK", "HEADROOM_OFFLINE"):
+        monkeypatch.delenv(var, raising=False)
+    sent: list[dict] = []
+    monkeypatch.setattr(S, "_post_blocking", lambda payload, **kwargs: sent.append(payload))
+    aggregator = S.SessionAggregator(S.post_session_event)
+    monkeypatch.setattr(S, "_aggregator", aggregator)
+    aggregator.record(
+        SimpleNamespace(provider="openai", model="gpt-5.4", tokens_saved=10, tags={}),
+        now=1_000.0,
+    )
+    monkeypatch.setenv("HEADROOM_TELEMETRY", "off")
+
+    S.post_session_event({"event": "session"})
+    S._flush_at_exit()
+
+    assert sent == []
 
 
 def test_beacon_on_overrides_telemetry_off(monkeypatch):

@@ -180,4 +180,6 @@ this page's "nothing leaves the machine" framing as universal:
   field list.
 
 These are deliberately separate so that enabling local `/stats` does not
-silently start an upload on the next release.
+silently start an upload on the next release. The one crossing only ever turns
+the upload off: an explicit `HEADROOM_TELEMETRY=off` also stops the beacon
+(unless `HEADROOM_BEACON=on`).
