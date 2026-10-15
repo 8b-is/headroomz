@@ -2338,11 +2338,17 @@ async def test_ws_session_metrics_track_model_per_response_create():
 
 
 @pytest.mark.asyncio
-async def test_ws_turn_hook_savings_reach_the_turn_outcome():
+@pytest.mark.parametrize(
+    ("usage", "expected"),
+    [({"input_tokens": 10, "output_tokens": 1}, [("ws_fold", True)]), (None, [])],
+    ids=["billed", "usage_less"],
+)
+async def test_ws_turn_hook_savings_reach_the_turn_outcome(usage, expected):
     """A turn hook's savings on a Codex WS turn must reach that turn's outcome.
 
     The WS path compressed without ``savings_tags``, so ``ctx.record_savings``
-    wrote into a throwaway dict and ``/stats`` never saw the attribution.
+    wrote into a throwaway dict and ``/stats`` never saw the attribution. A turn
+    with no input usage books nothing, the same gate as its headline savings.
     """
     from headroom.proxy.savings_attribution import from_tags
     from headroom.proxy.turn_hooks import clear_turn_hooks, register_turn_hook
@@ -2373,10 +2379,7 @@ async def test_ws_turn_hook_savings_reach_the_turn_outcome():
             json.dumps(
                 {
                     "type": "response.completed",
-                    "response": {
-                        "id": "r_1",
-                        "usage": {"input_tokens": 10, "output_tokens": 1},
-                    },
+                    "response": {"id": "r_1", **({"usage": usage} if usage else {})},
                 }
             ),
         ]
@@ -2402,5 +2405,5 @@ async def test_ws_turn_hook_savings_reach_the_turn_outcome():
     sent = json.loads(upstream.sent[0])["response"]["input"]
     assert [item["content"] for item in sent] == ["new"]  # the hook really ran
     rows = [row for outcome in outcomes for row in from_tags(outcome.tags)]
-    assert [(row["source"], row["realized"]) for row in rows] == [("ws_fold", True)]
-    assert rows[0]["tokens"] > 0
+    assert [(row["source"], row["realized"]) for row in rows] == expected
+    assert all(row["tokens"] > 0 for row in rows)

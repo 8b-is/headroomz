@@ -8958,12 +8958,15 @@ class OpenAIHandlerMixin:
                             # at the WS upgrade) so dashboards can
                             # slice WS turns by tag — same surface
                             # as HTTP turns.
-                            turn_tags = (
-                                {**ws_tags, SAVINGS_ATTRIBUTION_TAG: list(ws_turn_savings)}
-                                if ws_turn_savings
-                                else ws_tags
-                            )
-                            ws_turn_savings.clear()
+                            # Same gate as ``saved_delta``: a usage-less turn
+                            # leaves its rows pending for a usage-carrying one.
+                            turn_tags = ws_tags
+                            if ws_turn_savings and input_delta > 0:
+                                turn_tags = {
+                                    **ws_tags,
+                                    SAVINGS_ATTRIBUTION_TAG: list(ws_turn_savings),
+                                }
+                                ws_turn_savings.clear()
                             await self._record_request_outcome(
                                 RequestOutcome(
                                     # Per-emission ids keep dashboard request-log keys unique.
@@ -9605,8 +9608,9 @@ class OpenAIHandlerMixin:
                 "cache_write_tokens": str(ws_cache_write_tokens_total),
                 "uncached_input_tokens": str(ws_uncached_input_tokens_total),
             }
-            if ws_turn_savings:
-                # Rows from a frame no per-turn record claimed ride with the residual.
+            if ws_turn_savings and residual_input_tokens > 0:
+                # Rows no per-turn record claimed ride with the residual, under
+                # the same input-usage gate as ``residual_tokens_saved``.
                 ws_session_tags[SAVINGS_ATTRIBUTION_TAG] = list(ws_turn_savings)
             if (
                 residual_input_tokens > 0

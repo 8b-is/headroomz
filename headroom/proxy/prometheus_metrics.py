@@ -659,16 +659,17 @@ class PrometheusMetrics:
 
         Realized savings attribution rows (``ctx.record_savings`` from a turn
         hook, ``record_scope_savings``) plus ``record_extension_savings`` totals.
-        A source with its own ``record_extension_savings`` total keeps that total
-        rather than adding both: a plugin may report through both APIs.
-        Estimated rows (``realized=False``) stay in ``savings.by_source`` only.
+        A source reported through both APIs (``headroom-hdr`` does, per request)
+        shows the larger of the two totals rather than their sum: nothing ties an
+        attribution row to a ``record_extension_savings`` call, so summing would
+        double-count it. Estimated rows (``realized=False``) stay in
+        ``savings.by_source`` only.
         """
-        out = {
-            str(row["source"]): int(row["tokens"])
-            for row in list(self.savings_by_source.values())
-            if row["realized"] and int(row["tokens"]) > 0
-        }
-        out.update(self.extension_savings)
+        out = dict(self.extension_savings)
+        for row in list(self.savings_by_source.values()):
+            source, tokens = str(row["source"]), int(row["tokens"])
+            if row["realized"] and tokens > out.get(source, 0):
+                out[source] = tokens
         return out
 
     def record_compression_failed(self, reason: str) -> None:
