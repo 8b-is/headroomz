@@ -25,6 +25,7 @@ from datetime import datetime
 from typing import TYPE_CHECKING, Any
 from urllib.parse import quote, unquote, urlparse
 
+from headroom.log_safety import describe_exception
 from headroom.proxy.conversation_savings import savings_conversation_key
 from headroom.proxy.helpers import (
     COMPRESSION_TIMEOUT_SECONDS,
@@ -43,6 +44,7 @@ from headroom.proxy.provider_usage import (
     usage_int,
 )
 from headroom.proxy.rate_limit_identity import rate_limit_identity
+from headroom.proxy.savings import ItemMeasure, get_item_ledger, prefix_key, responses_items
 from headroom.proxy.semantic_cache_key_policy import compute_request_cache_partition
 from headroom.proxy.stage_timer import StageTimer, emit_stage_timings_log
 from headroom.proxy.tool_schema_savings_policy import without_deferral_flags
@@ -6271,6 +6273,36 @@ class OpenAIHandlerMixin:
                 "upstream request for server-side retrieval handling"
             )
 
+        # Per-item original/sent counts against this conversation's previous
+        # request, in Headroom's tokenizer (headroom.proxy.savings). ORIGINAL
+        # is the client's bytes, before memory, compression or shaping; SENT is
+        # the body forwarded below. All of it runs off the event loop: it
+        # decodes, serializes and tokenizes the whole transcript. Skipped for
+        # incremental bodies (previous_response_id / conversation): the
+        # provider bills context they do not carry. Recorded before the send,
+        # so it covers the first upstream call only; continuations and
+        # re-drives are the wiring's to mark as estimated.
+        savings_measure = None
+        if not (body.get("previous_response_id") or body.get("conversation")):
+
+            def _measure_items() -> ItemMeasure:
+                original = responses_items(json.loads(original_body_bytes))
+                return get_item_ledger().measure(
+                    prefix_key(_pre_compression_conversation_key, model, original),
+                    original,
+                    responses_items(body),
+                    tokenizer.count_text,
+                )
+
+            try:
+                savings_measure = await asyncio.to_thread(_measure_items)
+            except Exception as exc:  # noqa: BLE001 - telemetry must never break a request
+                logger.warning(
+                    "[%s] savings item measurement skipped: %s",
+                    request_id,
+                    describe_exception(exc),
+                )
+
         try:
             if stream and not buffered_stream_ccr:
                 # Streaming for Responses API uses semantic events
@@ -6295,6 +6327,7 @@ class OpenAIHandlerMixin:
                     waste_signals=waste_signals_dict,
                     conversation_key=responses_conversation_key,
                     conversation_tokens_saved=tokens_saved,
+                    savings_measure=savings_measure,
                 )
             else:
 
@@ -6756,6 +6789,7 @@ class OpenAIHandlerMixin:
                             tags=_resp_log_tags,
                             conversation_key=responses_conversation_key,
                             conversation_tokens_saved=tokens_saved,
+                            savings_measure=savings_measure,
                             turn_id=compute_turn_id(model, body.get("instructions"), messages),
                             request_messages=messages
                             if getattr(self.config, "log_full_messages", False)

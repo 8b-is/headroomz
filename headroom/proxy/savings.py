@@ -32,10 +32,14 @@ proxy startup.
 
 from __future__ import annotations
 
+import hashlib
+import json
 import logging
-from collections.abc import Sequence
-from dataclasses import dataclass
-from typing import TYPE_CHECKING
+import threading
+from collections import OrderedDict
+from collections.abc import Callable, Sequence
+from dataclasses import dataclass, replace
+from typing import TYPE_CHECKING, Any
 
 from headroom.log_safety import describe_exception, safe_id
 
@@ -51,7 +55,7 @@ OPENAI_CACHE_BLOCK_TOKENS = 128
 DEFAULT_MIN_CACHEABLE_TOKENS = 1024
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class ItemCounts:
     """One request item (tools block, system, or one input/message item).
 
@@ -85,6 +89,9 @@ class ItemMeasure:
     #: Sent tokens of old items that fell outside the sent shared prefix: cache
     #: misses caused only by Headroom changing what it had sent before.
     bust: int
+    #: False when Headroom changed the item count and the original/sent pairing
+    #: had to be approximated: the totals are exact, the old/new split is not.
+    aligned: bool = True
 
     @property
     def removed(self) -> int:
@@ -145,6 +152,186 @@ def measure_items(
         sent_shared_prefix=sum(sent[:n_sent_shared]),
         bust=sum(sent[n_sent_shared:n_old]),
     )
+
+
+def _dump(value: Any) -> str:
+    return json.dumps(value, ensure_ascii=False, separators=(",", ":"), default=str)
+
+
+#: One request item as (identity text, billable text): the identity is hashed
+#: to tell items apart, the billable text is what gets tokenized.
+Item = tuple[str, str]
+
+
+def _item(value: Any) -> Item:
+    identity = _dump(value)
+    if (
+        isinstance(value, dict)
+        and value.get("type") == "reasoning"
+        and "encrypted_content" in value
+    ):
+        # The provider bills the reasoning it decrypts, not the ciphertext,
+        # which would otherwise be most of a long Codex transcript's count.
+        billable = _dump({k: v for k, v in value.items() if k != "encrypted_content"})
+        return identity, billable
+    return identity, identity
+
+
+def responses_items(body: dict[str, Any]) -> list[Item]:
+    """A ``/v1/responses`` body as items in prompt order.
+
+    Tools, then instructions, then each ``input`` item: the order the provider
+    caches the prompt in, which is what the shared-prefix comparison needs.
+    Codex's ``additional_tools`` input items stay where the client put them.
+    """
+    items = [_item(body.get("tools") or []), _item(body.get("instructions") or "")]
+    raw = body.get("input")
+    if isinstance(raw, list):
+        items.extend(_item(item) for item in raw)
+    elif raw:
+        items.append(_item(raw))
+    return items
+
+
+def _digest(text: str) -> str:
+    return hashlib.blake2b(text.encode("utf-8", errors="replace"), digest_size=8).hexdigest()
+
+
+#: Items kept across all conversations' previous requests. A long Codex
+#: session carries 1000+ items; bounding items, not conversations, bounds memory.
+MAX_STORED_ITEMS = 100_000
+
+
+def _align(
+    original: list[tuple[str, int]],
+    sent: list[tuple[str, int]],
+    previous: Sequence[ItemCounts] | None,
+) -> tuple[list[ItemCounts], bool]:
+    """Pair original and sent items, and say whether the pairing is exact.
+
+    Same item count: by position (compression rewrites items in place). A
+    different count (a hook folded or dropped items, or Headroom inserted
+    some): identical items at either end pair up; the unmatched originals in
+    between are removed, and the unmatched sent items in between are folded
+    into the first of their slots. The totals stay exact either way; only
+    which items count as old is approximate, hence ``aligned=False``. An item
+    compressed in place still pairs at the head when the previous request
+    paired the same original with the same sent copy at that position.
+
+    Equal counts pair by position even if a fold and an insert cancel out.
+    """
+    if len(original) == len(sent):
+        return [ItemCounts(oh, ot, sh, st) for (oh, ot), (sh, st) in zip(original, sent)], True
+    limit = min(len(original), len(sent))
+    prev = previous or ()
+
+    def same_as_before(i: int) -> bool:
+        return (
+            i < len(prev)
+            and original[i][0] == prev[i].original_hash
+            and sent[i][0] == prev[i].sent_hash
+        )
+
+    head = 0
+    while head < limit and (original[head][0] == sent[head][0] or same_as_before(head)):
+        head += 1
+    tail = 0
+    while (
+        tail < limit - head
+        and original[len(original) - 1 - tail][0] == sent[len(sent) - 1 - tail][0]
+    ):
+        tail += 1
+    mid_original = original[head : len(original) - tail]
+    mid_sent = sent[head : len(sent) - tail]
+    if len(mid_sent) == 1:
+        folded_hash = mid_sent[0][0]
+    else:
+        folded_hash = _digest("\x00".join(h for h, _ in mid_sent)) if mid_sent else ""
+    folded_tokens = sum(t for _, t in mid_sent)
+    middle = [ItemCounts(oh, ot, "", 0) for oh, ot in mid_original] or [ItemCounts("", 0, "", 0)]
+    middle[0] = ItemCounts(
+        middle[0].original_hash, middle[0].original_tokens, folded_hash, folded_tokens
+    )
+    pairs = [ItemCounts(oh, ot, sh, st) for (oh, ot), (sh, st) in zip(original[:head], sent[:head])]
+    pairs += middle
+    pairs += [ItemCounts(h, t, h, t) for h, t in original[len(original) - tail :]]
+    return pairs, False
+
+
+class ItemLedger:
+    """The previous request of each conversation, for the old/new item split.
+
+    One instance per process. Items re-sent from the previous request reuse its
+    token counts, so a long transcript is tokenized once rather than every turn.
+    """
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._previous: OrderedDict[str, list[ItemCounts]] = OrderedDict()
+        self._stored = 0
+
+    def measure(
+        self,
+        key: str,
+        original: Sequence[Item],
+        sent: Sequence[Item],
+        count: Callable[[str], int],
+    ) -> ItemMeasure:
+        """Measure one request against ``key``'s previous one, then remember it."""
+        with self._lock:
+            previous = self._previous.get(key)
+        known: dict[str, int] = {}
+        for item in previous or ():
+            known[item.original_hash] = item.original_tokens
+            known[item.sent_hash] = item.sent_tokens
+
+        def counted(items: Sequence[Item]) -> list[tuple[str, int]]:
+            out = []
+            for identity, billable in items:
+                digest = _digest(identity)
+                tokens = known.get(digest)
+                if tokens is None:
+                    tokens = known[digest] = int(count(billable))
+                out.append((digest, tokens))
+            return out
+
+        items, aligned = _align(counted(original), counted(sent), previous)
+        with self._lock:
+            replaced = self._previous.pop(key, None)
+            self._stored -= len(replaced or ())
+            self._previous[key] = items
+            self._stored += len(items)
+            while self._stored > MAX_STORED_ITEMS and len(self._previous) > 1:
+                _, evicted = self._previous.popitem(last=False)
+                self._stored -= len(evicted)
+        measure = measure_items(items, previous)
+        return measure if aligned else replace(measure, aligned=False)
+
+
+_ledger = ItemLedger()
+
+
+def get_item_ledger() -> ItemLedger:
+    """Process-wide ledger: one conversation spans many requests and handlers."""
+    return _ledger
+
+
+def prefix_key(conversation: str | None, model: str, original: Sequence[Item]) -> str:
+    """Which previous request a request is compared against.
+
+    The conversation's explicit identity (``savings_conversation_key``) plus
+    the tools and instructions: a side request in the same session (compaction,
+    review) carries a different prefix and must not replace the conversation's
+    previous request. Without an identity, the model plus the first input item
+    stand in. Requests that collide on the key overwrite each other's previous
+    request, shortening the shared prefix: more of the removal is then priced
+    as new, at the miss rate, which overstates the saving.
+    """
+    head = "\x00".join(identity for identity, _ in original[:2])
+    if conversation:
+        # The model too: the provider's cache is per model, and so are counts.
+        return _digest("\x00".join([conversation, model, head]))
+    return _digest("\x00".join([model, *(identity for identity, _ in original[:3])]))
 
 
 def _input_cost(
@@ -209,7 +396,10 @@ def compute_savings_record(
     Never raises: a savings figure must not be able to fail a request.
     """
     try:
-        return _compute(measure, usage, model=model, provider=provider, estimated=estimated)
+        record = _compute(measure, usage, model=model, provider=provider, estimated=estimated)
+        # An approximate item pairing leaves the totals exact but not the
+        # old/new split the price depends on.
+        return record if measure.aligned else replace(record, estimated=True)
     except Exception as exc:  # noqa: BLE001 - pricing must never fail a request
         logger.debug(
             "savings: record failed for model=%s: %s", safe_id(model), describe_exception(exc)
@@ -331,9 +521,14 @@ def _compute(
 
 
 __all__ = [
+    "Item",
     "ItemCounts",
+    "ItemLedger",
     "ItemMeasure",
     "SavingsRecord",
     "compute_savings_record",
+    "get_item_ledger",
     "measure_items",
+    "prefix_key",
+    "responses_items",
 ]

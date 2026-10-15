@@ -33,6 +33,7 @@ from typing import Any
 
 from headroom.log_safety import describe_exception
 from headroom.proxy.conversation_savings import get_conversation_savings
+from headroom.proxy.savings import ItemMeasure
 from headroom.proxy.tool_schema_savings_policy import (
     headline_tokens_saved,
     tool_schema_saved_from_tags,
@@ -204,6 +205,11 @@ class RequestOutcome:
     #     path, where the outcome carries a per-turn delta.
     conversation_key: str | None = None
     conversation_tokens_saved: int | None = None
+    # savings_measure: the request's per-item original/sent counts against the
+    #     conversation's previous request (``headroom.proxy.savings``), from
+    #     which the per-request savings record is priced. None on paths that
+    #     do not measure items yet.
+    savings_measure: ItemMeasure | None = None
     transforms_applied: tuple[str, ...] = ()
     waste_signals: dict[str, int] | None = None
     num_messages: int = 0
@@ -339,6 +345,7 @@ class RequestOutcome:
         conversation_key: str | None = None,
         conversation_tokens_saved: int | None = None,
         provider_input_tokens: int = 0,
+        savings_measure: ItemMeasure | None = None,
     ) -> RequestOutcome:
         """Construct an outcome from the locals available at streaming
         finalize. Three streaming finalizers
@@ -414,6 +421,7 @@ class RequestOutcome:
             tokens_saved=tokens_saved,
             conversation_key=conversation_key,
             conversation_tokens_saved=conversation_tokens_saved,
+            savings_measure=savings_measure,
             attempted_input_tokens=optimized_tokens + tokens_saved,
             status_code=status_code,
             cache_read_tokens=cache_read_tokens,
