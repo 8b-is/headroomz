@@ -21,10 +21,11 @@ the same deprecation policy.
 
 from __future__ import annotations
 
+import inspect
 import logging
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, field
-from typing import Any, Protocol, runtime_checkable
+from typing import Any, Literal, Protocol, runtime_checkable
 
 from headroom.proxy.tool_schema_savings_policy import (
     deferred_booking,
@@ -90,10 +91,28 @@ class TurnContext:
         )
 
 
+@dataclass
+class ResponsesCreate:
+    """One OpenAI Responses create request, before the proxy rewrites it.
+
+    ``body`` is the Responses payload (for a WebSocket ``response.create``
+    frame, the inner ``response`` object). A hook's ``on_responses_create``
+    may rewrite it in place -- ``model``, ``reasoning`` or any other field --
+    and return True; everything after it (memory, compression, tool-search deferral, token
+    counting, pricing, metrics, the WS continuation template) sees the
+    rewritten body. ``headers`` are the client's request headers, or the
+    WebSocket handshake headers, looked up by lowercase name.
+    """
+
+    body: dict[str, Any]
+    headers: Mapping[str, str]
+    transport: Literal["http", "websocket"]
+
+
 @runtime_checkable
 class TurnHook(Protocol):
-    """A registered turn observer. Both methods are optional (a hook may define
-    either); missing methods are simply skipped."""
+    """A registered turn observer. Every method is optional (a hook may define
+    any of them); missing methods are simply skipped."""
 
     name: str
 
@@ -104,9 +123,10 @@ class TurnHook(Protocol):
     stream_safe: bool
 
     # Optional: run order among registered hooks, lowest first (stable for
-    # ties; absent ⇒ DEFAULT_HOOK_PRIORITY). Convention: routers that change
-    # ``ctx.model`` 10-49, message folds 50-99, tool-catalog shaping that is
-    # gated on the final model (deferral) 200+. Registration order is
+    # ties; absent ⇒ DEFAULT_HOOK_PRIORITY). Convention: routers 10-49 (an
+    # OpenAI Responses router rewrites the model in ``on_responses_create``,
+    # which runs before every ``on_request``), message folds 50-99,
+    # tool-catalog shaping that is gated on the final model (deferral) 200+. Registration order is
     # entry-point discovery order, which an operator does not control, so a
     # hook whose correctness depends on running after another must say so.
     priority: int
@@ -121,6 +141,22 @@ class TurnHook(Protocol):
 
         May ``await call_model(messages)`` to re-drive the model (e.g. to resolve
         an injected tool call), looping as needed before returning the final."""
+
+    async def on_responses_create(self, request: ResponsesCreate) -> bool:
+        """Rewrite an OpenAI Responses create request in place; return True
+        if ``request.body`` was changed.
+
+        Called once per HTTP ``/v1/responses`` body and once per WebSocket
+        ``response.create`` frame, on the event loop, before compression and
+        every model-gated stage (not when the client sent the Headroom bypass
+        header). This is where a router changes the model or reasoning effort:
+        unlike ``on_request`` it runs whether or not compression is enabled.
+
+        The return value is the contract: the proxy forwards the client's
+        original bytes unless some hook returns True, so an edit reported as
+        False is dropped on HTTP. The body is not copied or rolled back -- a
+        hook that raises must not leave a half-made edit behind. Keep it fast:
+        it is awaited inline on every frame, so no network I/O."""
 
 
 _hooks: list[TurnHook] = []
@@ -269,3 +305,24 @@ async def run_response_hooks(
         if replacement is not None:
             current = replacement
     return current
+
+
+async def run_responses_create_hooks(request: ResponsesCreate) -> bool:
+    """Run every hook's ``on_responses_create``; True if any reported a change.
+
+    Inert (returns False) when no hook defines the method. A failing hook is
+    logged and skipped. A sync method is accepted as well as a coroutine.
+    """
+    changed = False
+    for hook in registered_turn_hooks():
+        fn = getattr(hook, "on_responses_create", None)
+        if fn is None:
+            continue
+        try:
+            result = fn(request)
+            if inspect.isawaitable(result):
+                result = await result
+            changed = bool(result) or changed
+        except Exception:  # a hook must never break the proxy
+            log.exception("turn hook %r on_responses_create failed", getattr(hook, "name", hook))
+    return changed
