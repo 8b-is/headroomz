@@ -91,6 +91,31 @@ def test_a_bust_never_claims_more_reads_than_the_request_missed():
     assert record.saved_usd == pytest.approx(-(500 * (IN - READ) + 500 * (WRITE - READ)))
 
 
+def test_an_old_item_headroom_grew_never_drives_a_bucket_negative():
+    """1,000 original tokens sent as 10,000 both times, prompt cached."""
+    measure = ItemMeasure(
+        sent_tokens=10_000, removed_old=-9_000, removed_new=0, sent_shared_prefix=10_000, bust=0
+    )
+    usage = CacheMix(read=9_000, uncached=1_000)
+    for provider in ("openai", "anthropic"):
+        record = compute_savings_record(measure, usage, model="gpt", provider=provider)
+        assert record.counterfactual_input_cost_usd >= 0
+        # The 1,000-token original would have been the only input.
+        assert record.counterfactual_input_cost_usd <= 1_000 * IN
+
+
+def test_summed_iteration_usage_does_not_calibrate_k():
+    """Usage summed over server-side iterations describes more prompts than
+    the one sent body, so it must not scale the removal."""
+    summed = CacheMix(read=270_000, uncached=6_000, write_5m=24_000)
+    record = compute_savings_record(
+        MEASURE, summed, model="sonnet", provider="anthropic", estimated=True
+    )
+    assert record.k == 1.0
+    assert record.estimated
+    assert record.saved_tokens == 60_000
+
+
 def test_a_cold_cache_prices_every_removed_token_as_a_miss():
     cold = CacheMix(uncached=10_000, read=0, write_5m=90_000)
     record = compute_savings_record(MEASURE, cold, model="sonnet", provider="anthropic")
@@ -185,3 +210,17 @@ def test_items_split_into_old_and_new_against_the_previous_request():
         sent_shared_prefix=700,
         bust=250,
     )
+
+
+def test_billed_buckets_price_at_billing_rates(monkeypatch):
+    """A catalog row without a cache-read rate bills reads via litellm's
+    calculator (``for_billing``); only the changed tokens use the estimate."""
+    billing = dataclasses.replace(BASE, read=5e-7)
+
+    def rates(model, *, long_context=False, provider=None, for_billing=False):
+        return billing if for_billing else BASE
+
+    monkeypatch.setattr(counterfactual, "resolve_rates", rates)
+    record = compute_savings_record(MEASURE, WARM, model="sonnet", provider="anthropic")
+    assert record.actual_input_cost_usd == pytest.approx(2_000 * IN + 90_000 * 5e-7 + 8_000 * WRITE)
+    assert record.saved_usd == pytest.approx(0.058618, abs=1e-6)

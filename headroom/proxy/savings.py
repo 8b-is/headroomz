@@ -195,9 +195,16 @@ def compute_savings_record(
     here, so an inferred OpenAI write counts as the uncached slice it is).
     ``None`` or an empty mix means the provider reported nothing (an aborted
     stream); the record then prices at list with ``k = 1`` and is marked
-    ``estimated``. ``estimated=True`` also marks a request whose usage was
-    summed across server-side iterations. ``provider`` must be given for
-    OpenAI's 128-token cache blocks to apply.
+    ``estimated``.
+
+    For a request the provider ran as several server-side iterations, pass the
+    FIRST iteration's usage when it is available (``estimated=False``); the
+    later iterations are a cost the caller books separately. Pass the summed
+    usage with ``estimated=True`` only when per-iteration usage is not
+    available: the sum describes more prompts than the one sent body, so
+    ``k`` is not calibrated from it (``k = 1``) and only its cache ratios are
+    used. ``provider`` must be given for OpenAI's 128-token cache blocks to
+    apply.
 
     Never raises: a savings figure must not be able to fail a request.
     """
@@ -220,9 +227,12 @@ def _compute(
 ) -> SavingsRecord:
     from headroom.pricing.counterfactual import LONG_CONTEXT_THRESHOLD_TOKENS, resolve_rates
 
-    def rates_for(billed: float) -> CacheRates | None:
+    def rates_for(billed: float, *, for_billing: bool = False) -> CacheRates | None:
         return resolve_rates(
-            model, long_context=billed > LONG_CONTEXT_THRESHOLD_TOKENS, provider=provider
+            model,
+            long_context=billed > LONG_CONTEXT_THRESHOLD_TOKENS,
+            provider=provider,
+            for_billing=for_billing,
         )
 
     removed = measure.removed
@@ -248,7 +258,7 @@ def _compute(
 
     billed = mix.billed
     writes = mix.write_5m + mix.write_1h
-    k = billed / measure.sent_tokens if measure.sent_tokens > 0 else 1.0
+    k = billed / measure.sent_tokens if measure.sent_tokens > 0 and not estimated else 1.0
     hit = mix.read / billed
     sigma = measure.sent_shared_prefix / measure.sent_tokens if measure.sent_tokens > 0 else 0.0
     warm = min(1.0, hit / sigma) if sigma > 0 else 0.0
@@ -265,8 +275,13 @@ def _compute(
     # the counterfactual missed at all: a bust cannot turn more tokens into
     # reads than the request actually missed plus what Headroom removed, and
     # without the cap the counterfactual buckets go negative.
-    extra_read = min(k * (measure.removed_old + measure.bust) * warm, misses + k * removed)
-    if provider == "openai":
+    # It can be negative when an old item grew; it never removes more reads
+    # than the request had.
+    extra_read = max(
+        -float(mix.read),
+        min(k * (measure.removed_old + measure.bust) * warm, misses + k * removed),
+    )
+    if provider == "openai" and extra_read > 0:
         # Hits come in whole 128-token blocks; the remainder stays a miss.
         total_read = mix.read + extra_read
         blocks = (total_read // OPENAI_CACHE_BLOCK_TOKENS) * OPENAI_CACHE_BLOCK_TOKENS
@@ -275,24 +290,32 @@ def _compute(
     extra_write = extra_miss * w
     w5_share = mix.write_5m / writes if writes > 0 else 1.0
 
-    actual_rates = rates_for(billed)
-    cf_rates = rates_for(billed + k * removed)
-    if actual_rates is None or cf_rates is None:
+    # The billed buckets price at billing rates on both sides (the
+    # counterfactual's at its own context tier); only the tokens Headroom
+    # changed price at the savings-estimate rates.
+    cf_billed = billed + k * removed
+    actual_rates = rates_for(billed, for_billing=True)
+    cf_billing_rates = rates_for(cf_billed, for_billing=True)
+    cf_rates = rates_for(cf_billed)
+    if actual_rates is None or cf_billing_rates is None or cf_rates is None:
         return _unpriced(measure, k=k, estimated=estimated)
 
-    actual = _input_cost(
-        actual_rates,
-        uncached=mix.uncached,
-        read=mix.read,
-        write_5m=mix.write_5m,
-        write_1h=mix.write_1h,
-    )
-    counterfactual = _input_cost(
+    def billed_cost(rates: CacheRates) -> float:
+        return _input_cost(
+            rates,
+            uncached=mix.uncached,
+            read=mix.read,
+            write_5m=mix.write_5m,
+            write_1h=mix.write_1h,
+        )
+
+    actual = billed_cost(actual_rates)
+    counterfactual = billed_cost(cf_billing_rates) + _input_cost(
         cf_rates,
-        uncached=mix.uncached + extra_miss - extra_write,
-        read=mix.read + extra_read,
-        write_5m=mix.write_5m + extra_write * w5_share,
-        write_1h=mix.write_1h + extra_write * (1.0 - w5_share),
+        uncached=extra_miss - extra_write,
+        read=extra_read,
+        write_5m=extra_write * w5_share,
+        write_1h=extra_write * (1.0 - w5_share),
     )
     return SavingsRecord(
         saved_usd=counterfactual - actual,
