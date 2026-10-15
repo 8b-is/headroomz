@@ -253,6 +253,32 @@ def test_create_storage_warns_when_a_backend_plugin_fails_to_load(
     assert _fallback_warnings(storage_log) == []
 
 
+@pytest.mark.parametrize("level", [logging.INFO, logging.DEBUG])
+def test_storage_plugin_class_name_cannot_leak_or_forge_log_lines(
+    monkeypatch: pytest.MonkeyPatch, storage_log: _ListHandler, level: int
+) -> None:
+    error_type = type("PRIVATE_CREDENTIAL_CANARY\nFORGED_LOG_ENTRY", (RuntimeError,), {})
+
+    def _rejecting_factory(url: str) -> DummyStorage:
+        raise error_type("plugin text")
+
+    fallback = SimpleNamespace()
+    monkeypatch.delenv("HEADROOM_DEBUG_DUMP", raising=False)
+    monkeypatch.setattr("headroom.storage.SQLiteStorage", lambda db_path: fallback)
+    monkeypatch.setattr(
+        "importlib.metadata.entry_points",
+        lambda group: [SimpleNamespace(name="plugin", load=lambda: _rejecting_factory)],
+    )
+    logging.getLogger("headroom.storage").setLevel(level)
+    assert create_storage("plugin://host/db") is fallback
+    assert len(_fallback_warnings(storage_log)) == 1
+    for record in storage_log.records:
+        rendered = logging.Formatter().format(record)
+        assert "PRIVATE_CREDENTIAL_CANARY" not in rendered
+        assert "FORGED_LOG_ENTRY" not in rendered
+        assert "\n" not in rendered
+
+
 def test_jsonl_storage_round_trip_query_count_and_summary(tmp_path: Path) -> None:
     storage = JSONLStorage(str(tmp_path / "metrics.jsonl"))
     now = datetime(2026, 4, 23, 12, 0, 0)

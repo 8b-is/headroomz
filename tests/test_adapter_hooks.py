@@ -15,6 +15,7 @@ Tests cover:
 from __future__ import annotations
 
 import json
+import logging
 import threading
 from typing import Any
 
@@ -450,6 +451,48 @@ class TestCCREntryPointLoading:
             assert "CRED_CANARY" not in rendered
             assert "CONTENT_CANARY" not in rendered
         assert any("ConnectionError" in r.getMessage() for r in records)
+
+    @pytest.mark.parametrize("level", [logging.INFO, logging.DEBUG])
+    def test_backend_plugin_class_name_cannot_leak_or_forge_log_lines(self, monkeypatch, level):
+        """A plugin chooses its exception's class name; the WARNING must not carry it."""
+        from types import SimpleNamespace
+
+        from headroom.cache.compression_store import _create_default_ccr_backend
+
+        error_type = type("PRIVATE_CREDENTIAL_CANARY\nFORGED_LOG_ENTRY", (RuntimeError,), {})
+
+        def _factory(url: str, tenant_prefix: str) -> None:
+            raise error_type("plugin text")
+
+        monkeypatch.delenv("HEADROOM_DEBUG_DUMP", raising=False)
+        monkeypatch.setenv("HEADROOM_CCR_BACKEND", "redisx")
+        monkeypatch.setattr(
+            "importlib.metadata.entry_points",
+            lambda group: [SimpleNamespace(name="redisx", load=lambda: _factory)],
+        )
+        records: list[logging.LogRecord] = []
+
+        class _Collect(logging.Handler):
+            def emit(self, record: logging.LogRecord) -> None:
+                records.append(record)
+
+        logger = logging.getLogger("headroom.cache.compression_store")
+        handler = _Collect(level=logging.DEBUG)
+        previous = logger.level
+        logger.addHandler(handler)
+        logger.setLevel(level)
+        try:
+            assert _create_default_ccr_backend() is None
+        finally:
+            logger.removeHandler(handler)
+            logger.setLevel(previous)
+
+        assert len([r for r in records if r.levelno == logging.WARNING]) == 1
+        for record in records:
+            rendered = logging.Formatter().format(record)
+            assert "PRIVATE_CREDENTIAL_CANARY" not in rendered
+            assert "FORGED_LOG_ENTRY" not in rendered
+            assert "\n" not in rendered
 
     def test_inmemory_backend_satisfies_protocol(self):
         """InMemoryBackend satisfies the CompressionStoreBackend protocol."""

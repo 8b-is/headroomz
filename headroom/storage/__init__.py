@@ -3,7 +3,7 @@
 import logging
 import os
 
-from headroom.log_safety import describe_exception
+from headroom.log_safety import describe_exception, safe_id
 
 from .base import Storage
 from .jsonl import JSONLStorage
@@ -81,7 +81,7 @@ def create_storage(store_url: str) -> Storage:
                     "Failed to load storage backend for scheme %r (%s); "
                     "falling back to SQLite storage",
                     scheme,
-                    type(e).__name__,
+                    safe_id(e),
                 )
                 if logger.isEnabledFor(logging.DEBUG):
                     logger.debug(

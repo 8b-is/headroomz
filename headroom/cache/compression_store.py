@@ -43,7 +43,7 @@ from contextvars import ContextVar
 from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Any
 
-from ..log_safety import describe_exception
+from ..log_safety import describe_exception, safe_id
 
 if TYPE_CHECKING:
     from ..memory.tracker import ComponentStats
@@ -1172,7 +1172,7 @@ def _create_default_ccr_backend() -> CompressionStoreBackend | None:
             "Failed to load CCR backend %s (%s); falling back to the in-process store. "
             "Retrieval will not survive proxy restarts or cross worker processes.",
             backend_type,
-            type(e).__name__,
+            safe_id(e),
         )
         if logger.isEnabledFor(logging.DEBUG):
             logger.debug("CCR backend %s load failure: %s", backend_type, describe_exception(e))
