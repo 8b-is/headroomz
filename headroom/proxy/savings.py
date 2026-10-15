@@ -185,7 +185,8 @@ def responses_items(body: dict[str, Any]) -> list[Item]:
     Codex's ``additional_tools`` input items stay where the client put them.
     """
     items = [_item(body.get("tools") or []), _item(body.get("instructions") or "")]
-    raw = body.get("input")
+    # OpenAI-compatible upstreams accept ``messages`` in place of ``input``.
+    raw = body.get("input") if body.get("input") is not None else body.get("messages")
     if isinstance(raw, list):
         items.extend(_item(item) for item in raw)
     elif raw:
@@ -258,17 +259,29 @@ def _align(
     return pairs, False
 
 
+#: Measured requests awaiting their outcome. A request whose outcome never
+#: arrives (a dropped connection) is forgotten once this many are newer.
+MAX_PENDING_REQUESTS = 4096
+
+
 class ItemLedger:
     """The previous request of each conversation, for the old/new item split.
 
-    One instance per process. Items re-sent from the previous request reuse its
-    token counts, so a long transcript is tokenized once rather than every turn.
+    One instance per process. A request is measured against the conversation's
+    last SUCCESSFUL request and becomes the baseline only once its own outcome
+    succeeds (:meth:`settle`): a failed call never reached the provider's cache.
+    Requests are sequenced at measure time, so a slow earlier turn settling
+    late cannot replace a newer turn's baseline. Items re-sent from the
+    baseline reuse its token counts, so a long transcript is tokenized once
+    rather than every turn.
     """
 
     def __init__(self) -> None:
         self._lock = threading.Lock()
-        self._previous: OrderedDict[str, list[ItemCounts]] = OrderedDict()
+        self._previous: OrderedDict[str, tuple[int, list[ItemCounts]]] = OrderedDict()
+        self._pending: OrderedDict[str, tuple[str, int, list[ItemCounts]]] = OrderedDict()
         self._stored = 0
+        self._seq = 0
 
     def measure(
         self,
@@ -276,10 +289,15 @@ class ItemLedger:
         original: Sequence[Item],
         sent: Sequence[Item],
         count: Callable[[str], int],
+        *,
+        request_id: str,
     ) -> ItemMeasure:
-        """Measure one request against ``key``'s previous one, then remember it."""
+        """Measure one request against ``key``'s baseline; settle it later."""
         with self._lock:
-            previous = self._previous.get(key)
+            self._seq += 1
+            seq = self._seq
+            entry = self._previous.get(key)
+        previous = entry[1] if entry else None
         known: dict[str, int] = {}
         for item in previous or ():
             known[item.original_hash] = item.original_tokens
@@ -297,15 +315,29 @@ class ItemLedger:
 
         items, aligned = _align(counted(original), counted(sent), previous)
         with self._lock:
-            replaced = self._previous.pop(key, None)
-            self._stored -= len(replaced or ())
-            self._previous[key] = items
-            self._stored += len(items)
-            while self._stored > MAX_STORED_ITEMS and len(self._previous) > 1:
-                _, evicted = self._previous.popitem(last=False)
-                self._stored -= len(evicted)
+            self._pending[request_id] = (key, seq, items)
+            while len(self._pending) > MAX_PENDING_REQUESTS:
+                self._pending.popitem(last=False)
         measure = measure_items(items, previous)
         return measure if aligned else replace(measure, aligned=False)
+
+    def settle(self, request_id: str, *, succeeded: bool) -> None:
+        """Make a measured request its conversation's baseline if it succeeded."""
+        with self._lock:
+            pending = self._pending.pop(request_id, None)
+            if pending is None or not succeeded:
+                return
+            key, seq, items = pending
+            current = self._previous.get(key)
+            if current is not None and current[0] > seq:
+                return
+            self._stored -= len(current[1]) if current else 0
+            self._previous[key] = (seq, items)
+            self._previous.move_to_end(key)
+            self._stored += len(items)
+            while self._stored > MAX_STORED_ITEMS and len(self._previous) > 1:
+                _, (_, evicted) = self._previous.popitem(last=False)
+                self._stored -= len(evicted)
 
 
 _ledger = ItemLedger()

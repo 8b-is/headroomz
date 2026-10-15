@@ -24,6 +24,17 @@ def _items(*texts: str) -> list[tuple[str, str]]:
     return [(t, t) for t in texts]
 
 
+_ids = iter(range(10**6))
+
+
+def _turn(ledger, original, sent, count=_words, *, succeeded=True):
+    """Measure one request and settle it, as the outcome funnel does."""
+    rid = f"r{next(_ids)}"
+    m = ledger.measure("conv", original, sent, count, request_id=rid)
+    ledger.settle(rid, succeeded=succeeded)
+    return m
+
+
 def test_a_conversation_is_measured_against_its_previous_request():
     ledger = ItemLedger()
     calls: list[str] = []
@@ -37,10 +48,10 @@ def test_a_conversation_is_measured_against_its_previous_request():
     second = [*first, '{"d":4,"e":5}']
     sent2 = [*sent1, '{"d":4}']
 
-    assert ledger.measure("conv", _items(*first), _items(*sent1), count) == ItemMeasure(
+    assert _turn(ledger, _items(*first), _items(*sent1), count) == ItemMeasure(
         sent_tokens=5, removed_old=0, removed_new=1, sent_shared_prefix=0, bust=0
     )
-    assert ledger.measure("conv", _items(*second), _items(*sent2), count) == ItemMeasure(
+    assert _turn(ledger, _items(*second), _items(*sent2), count) == ItemMeasure(
         sent_tokens=6, removed_old=1, removed_new=1, sent_shared_prefix=5, bust=0
     )
     # Re-sent items are tokenized once, not once per turn.
@@ -68,8 +79,8 @@ def test_a_folded_transcript_keeps_the_old_items_old():
     ledger = ItemLedger()
     t, i = "[]", '"sys"'
     a, b, c, d = ("," * 9 + x for x in "abcd")  # 10 tokens each under _words
-    ledger.measure("conv", _items(t, i, a, b, c), _items(t, i, a, b, c), _words)
-    m = ledger.measure("conv", _items(t, i, a, b, c, d), _items(t, i, "f", c, d), _words)
+    _turn(ledger, _items(t, i, a, b, c), _items(t, i, a, b, c), _words)
+    m = _turn(ledger, _items(t, i, a, b, c, d), _items(t, i, "f", c, d), _words)
     assert (m.removed_old, m.removed_new) == (19, 0)
     # The fold moved c: its sent copy is outside the shared prefix, a bust.
     assert m.bust == 11 and m.aligned is False
@@ -83,8 +94,8 @@ def test_a_fold_after_an_item_compressed_in_place_keeps_the_prefix():
     t, i = "[]", '"sys"'
     big, small = "," * 99 + "x", "x"  # 100 and 1 tokens under _words
     n1, n2 = "," * 9 + "n", "," * 9 + "m"
-    ledger.measure("conv", _items(t, i, big), _items(t, i, small), _words)
-    m = ledger.measure("conv", _items(t, i, big, n1, n2), _items(t, i, small, "f"), _words)
+    _turn(ledger, _items(t, i, big), _items(t, i, small), _words)
+    m = _turn(ledger, _items(t, i, big, n1, n2), _items(t, i, small, "f"), _words)
     assert (m.sent_shared_prefix, m.bust) == (3, 0)
     assert (m.removed_old, m.removed_new) == (99, 19)
     assert m.aligned is False
@@ -95,6 +106,30 @@ def test_an_approximate_pairing_marks_the_record_estimated():
         sent_tokens=10, removed_old=0, removed_new=5, sent_shared_prefix=0, bust=0, aligned=False
     )
     assert savings.compute_savings_record(m, None, model="unpriced-model").estimated
+
+
+def test_a_failed_request_does_not_become_the_baseline():
+    ledger = ItemLedger()
+    first = _items("[]", '"sys"', '"a"')
+    _turn(ledger, first, first)
+    _turn(ledger, _items("[]", '"other"', '"b"'), _items("[]", '"other"', '"b"'), succeeded=False)
+    assert _turn(ledger, first, first).sent_shared_prefix == 3
+
+
+def test_a_late_settling_older_turn_keeps_the_newer_baseline():
+    ledger = ItemLedger()
+    old, new = _items("[]", '"a"'), _items("[]", '"a"', '"b"')
+    ledger.measure("conv", old, old, _words, request_id="slow")
+    ledger.measure("conv", new, new, _words, request_id="fast")
+    ledger.settle("fast", succeeded=True)
+    ledger.settle("slow", succeeded=True)
+    assert _turn(ledger, new, new).sent_shared_prefix == 3
+
+
+def test_messages_stand_in_for_input():
+    assert responses_items({"messages": [{"role": "user", "content": "hi"}]})[2:] == _items(
+        '{"role":"user","content":"hi"}'
+    )
 
 
 def test_side_requests_do_not_replace_the_conversations_previous_request():
@@ -128,10 +163,9 @@ def test_responses_outcomes_carry_the_measure(monkeypatch, stream):
     app.dependency_overrides[require_loopback] = lambda: None
     outcomes: list[Any] = []
 
-    async def _spy(_self, outcome, *a, **kw):
-        outcomes.append(outcome)
-
-    monkeypatch.setattr(type(app.state.proxy), "_record_request_outcome", _spy)
+    # Capture at the funnel's first effect, so the real funnel (which settles
+    # the measure) still runs.
+    monkeypatch.setattr("headroom.telemetry.session.record_outcome", outcomes.append)
     monkeypatch.setattr(savings, "_ledger", ItemLedger())
     usage = {"input_tokens": 10, "output_tokens": 1}
     respx.post("https://api.openai.com/v1/responses").mock(

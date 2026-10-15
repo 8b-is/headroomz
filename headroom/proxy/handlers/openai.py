@@ -6279,9 +6279,9 @@ class OpenAIHandlerMixin:
         # the body forwarded below. All of it runs off the event loop: it
         # decodes, serializes and tokenizes the whole transcript. Skipped for
         # incremental bodies (previous_response_id / conversation): the
-        # provider bills context they do not carry. Recorded before the send,
-        # so it covers the first upstream call only; continuations and
-        # re-drives are the wiring's to mark as estimated.
+        # provider bills context they do not carry. It covers the first
+        # upstream call only; continuations and re-drives are the wiring's to
+        # mark as estimated. The outcome funnel settles it (ItemLedger.settle).
         savings_measure = None
         if not (body.get("previous_response_id") or body.get("conversation")):
 
@@ -6292,6 +6292,7 @@ class OpenAIHandlerMixin:
                     original,
                     responses_items(body),
                     tokenizer.count_text,
+                    request_id=request_id,
                 )
 
             try:
