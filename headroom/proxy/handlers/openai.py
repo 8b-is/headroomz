@@ -47,7 +47,7 @@ from headroom.proxy.rate_limit_identity import rate_limit_identity
 from headroom.proxy.semantic_cache_key_policy import compute_request_cache_partition
 from headroom.proxy.stage_timer import StageTimer, emit_stage_timings_log
 from headroom.proxy.tool_schema_savings_policy import without_deferral_flags
-from headroom.proxy.turn_hooks import ResponsesCreate, run_responses_create_hooks
+from headroom.proxy.turn_hooks import run_responses_create_hooks
 from headroom.proxy.upstream_guard import is_safe_upstream_url
 from headroom.proxy.ws_headers import WS_HOP_BY_HOP_HEADERS
 from headroom.proxy.ws_session_registry import (
@@ -1901,7 +1901,7 @@ class OpenAIHandlerMixin:
         if not isinstance(inner, dict):
             return False
         return await run_responses_create_hooks(
-            ResponsesCreate(body=inner, headers=MappingProxyType(ws_headers), transport="websocket")
+            inner, headers=MappingProxyType(ws_headers), transport="websocket"
         )
 
     @staticmethod
@@ -5570,7 +5570,6 @@ class OpenAIHandlerMixin:
                 "[%s] Responses passthrough reason=bypass_header mutation=disabled",
                 request_id,
             )
-        stream = body.get("stream", False)
 
         from headroom.proxy.helpers import capture_codex_wire_debug
 
@@ -5583,15 +5582,17 @@ class OpenAIHandlerMixin:
             url=str(request.url),
             headers=dict(request.headers.items()),
             body=body,
-            metadata={"path": request.url.path, "stream": stream},
+            metadata={"path": request.url.path, "stream": body.get("stream", False)},
         )
-        # Before every stage that reads the model, so a router's rewrite is
-        # what compression, deferral, token counting and pricing all see.
+        # Before every stage that reads the body, so a hook's replacement is
+        # what compression, deferral, token counting, pricing and the
+        # stream/buffered dispatch all see.
         if not _bypass and await run_responses_create_hooks(
-            ResponsesCreate(body=body, headers=request.headers, transport="http")
+            body, headers=request.headers, transport="http"
         ):
             body_mutation_tracker.mark_mutated("responses_create_hook")
         model = body.get("model", "unknown")
+        stream = body.get("stream", False)
 
         # /v1/responses uses provider-specific CompressionUnit extraction
         # below, then routes mutable text through ContentRouter. The

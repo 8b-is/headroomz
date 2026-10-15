@@ -42,13 +42,11 @@ class _Router:
     def __init__(self) -> None:
         self.seen: list[tuple[str, str, str | None]] = []
 
-    async def on_responses_create(self, request: ResponsesCreate) -> None:
+    async def on_responses_create(self, request: ResponsesCreate) -> dict:
         self.seen.append(
             (request.transport, str(request.body.get("model")), request.headers.get("user-agent"))
         )
-        request.body["model"] = "gpt-5.4-mini"
-        request.body["reasoning"] = {"effort": "low"}
-        return True
+        return {**request.body, "model": "gpt-5.4-mini", "reasoning": {"effort": "low"}}
 
 
 def _create(text: str, **extra: Any) -> str:
@@ -120,7 +118,8 @@ async def test_a_hook_that_raises_does_not_break_the_session() -> None:
         name = "broken"
 
         async def on_responses_create(self, request: ResponsesCreate) -> None:
-            raise RuntimeError("boom")
+            # The body is read-only: a hook cannot half-apply an edit and then fail.
+            request.body["model"] = "gpt-5.4-mini"  # type: ignore[index]
 
     register_turn_hook(_Broken())
     frames = [_create("first")]
@@ -133,8 +132,8 @@ async def test_a_hook_that_raises_does_not_break_the_session() -> None:
 class _NoOp:
     name = "no-op"
 
-    async def on_responses_create(self, request: ResponsesCreate) -> bool:
-        return False
+    async def on_responses_create(self, request: ResponsesCreate) -> None:
+        return None
 
 
 def _post_http(raw: bytes, headers: dict[str, str] | None = None) -> tuple[Any, list, list]:
@@ -242,3 +241,51 @@ def test_http_bypass_header_skips_the_hook() -> None:
     assert resp.status_code == 200, resp.text
     assert router.seen == []
     assert sent == [(json.loads(_RAW), False)]
+
+
+def test_http_hook_that_turns_on_streaming_takes_the_streaming_path() -> None:
+    class _Streamer:
+        name = "streamer"
+
+        async def on_responses_create(self, request: ResponsesCreate) -> dict:
+            return {**request.body, "stream": True}
+
+    register_turn_hook(_Streamer())
+    pytest.importorskip("fastapi")
+    from fastapi.responses import JSONResponse
+    from fastapi.testclient import TestClient
+
+    from headroom.proxy.loopback_guard import require_loopback
+    from headroom.proxy.server import ProxyConfig, create_app
+
+    app = create_app(
+        ProxyConfig(
+            optimize=False,
+            cache_enabled=False,
+            rate_limit_enabled=False,
+            cost_tracking_enabled=False,
+        )
+    )
+    app.dependency_overrides[require_loopback] = lambda: None
+    streamed: list[dict] = []
+
+    with TestClient(app) as client:
+        server = app.state.proxy
+
+        async def fake_stream(url, headers, body, *args, **kwargs):
+            streamed.append(body)
+            return JSONResponse({"ok": True})
+
+        async def no_buffered(*args, **kwargs):
+            raise AssertionError("a streaming upstream request took the buffered path")
+
+        server._stream_response = fake_stream
+        server._retry_request = no_buffered
+        resp = client.post(
+            "/v1/responses",
+            content=_RAW,
+            headers={"Authorization": "Bearer sk-test", "Content-Type": "application/json"},
+        )
+
+    assert resp.status_code == 200, resp.text
+    assert [b["stream"] for b in streamed] == [True]
