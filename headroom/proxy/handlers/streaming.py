@@ -421,6 +421,13 @@ class StreamingMixin:
                         usage_found["cache_read_input_tokens"] = usage_int(
                             details.get("cached_tokens")
                         )
+                        # Responses reports billed cache writes itself; the
+                        # Anthropic-shape key routes them down the real-write
+                        # branch instead of inferring them from uncached.
+                        if details.get("cache_write_tokens") is not None:
+                            usage_found["cache_creation_input_tokens"] = usage_int(
+                                details.get("cache_write_tokens")
+                            )
 
             elif provider == "gemini":
                 usage_meta = _sse_dict(data.get("usageMetadata"))
