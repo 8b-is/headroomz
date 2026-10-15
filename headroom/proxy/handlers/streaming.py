@@ -2432,12 +2432,15 @@ class StreamingMixin:
                 # Bedrock/Anthropic shape when present. Fall back to
                 # inferring write count from total - read for OpenAI
                 # shape (which has no separate write counter).
-                cache_creation_input_tokens = stream_state.get("cache_creation_input_tokens") or 0
+                # None means "not reported"; an explicit 0 is a reported zero
+                # and must not fall through to the inferred branch.
+                reported_write = stream_state.get("cache_creation_input_tokens")
+                cache_creation_input_tokens = reported_write or 0
                 if upstream_input is None:
                     cache_write_tokens = 0
                     uncached_input_tokens = 0
                     cache_inferred = False
-                elif cache_creation_input_tokens > 0:
+                elif reported_write is not None:
                     cache_write_tokens = cache_creation_input_tokens
                     uncached_input_tokens = max(
                         upstream_input - cache_read_tokens - cache_write_tokens, 0

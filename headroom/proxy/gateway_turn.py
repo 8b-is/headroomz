@@ -351,17 +351,20 @@ def normalize_usage(usage: dict[str, Any]) -> NormalizedUsage:
 
     cache_read = _usage_int(usage, "cache_read_input_tokens")
     cache_write = _usage_int(usage, "cache_creation_input_tokens")
+    if cache_write is None:
+        # Responses reports billed writes as input_tokens_details.cache_write_tokens;
+        # chat reports none. Read whether or not a top-level read was relayed.
+        details = usage.get("input_tokens_details")
+        if isinstance(details, dict):
+            cache_write = _usage_int(details, "cache_write_tokens")
     if cache_read is None:
         # OpenAI nests reads under prompt_tokens_details (chat),
         # input_tokens_details (Responses) or — in Kong's flattened log shape —
-        # puts them at the top level. Responses also reports billed writes
-        # there as ``cache_write_tokens``; chat reports none.
+        # puts them at the top level.
         for details_key in ("prompt_tokens_details", "input_tokens_details"):
             details = usage.get(details_key)
             if isinstance(details, dict):
                 cache_read = _usage_int(details, "cached_tokens")
-                if cache_write is None:
-                    cache_write = _usage_int(details, "cache_write_tokens")
                 if cache_read is not None:
                     break
         if cache_read is None:

@@ -1671,10 +1671,16 @@ def _reported_cache_write(details: Any) -> int | None:
 
 
 def _hook_reported_write(final_write: int | None, hook_usage: Any) -> int | None:
-    """The final response's reported write plus any turn-hook re-drives' writes."""
+    """The final response's reported write plus any turn-hook re-drives' writes.
+
+    A final response without the field still carries the re-drives' reported
+    writes: treating its own write as 0 prices the same as inferring it, since
+    an inferred write is dropped from pricing anyway.
+    """
+    hook_writes = hook_usage.cache_write_tokens if hook_usage.extra_calls else 0
     if final_write is None:
-        return None
-    return final_write + (hook_usage.cache_write_tokens if hook_usage.extra_calls else 0)
+        return hook_writes or None
+    return final_write + hook_writes
 
 
 def _openai_responses_cache_split(

@@ -459,6 +459,17 @@ def test_normalize_openai_responses_reported_cache_writes() -> None:
     assert u == NormalizedUsage(10, 2, 6, 3, input_includes_cache=True)
 
 
+def test_normalize_reads_nested_writes_beside_a_top_level_read() -> None:
+    u = normalize_usage(
+        {
+            "input_tokens": 100,
+            "cache_read_input_tokens": 70,
+            "input_tokens_details": {"cached_tokens": 70, "cache_write_tokens": 20},
+        }
+    )
+    assert (u.cache_read, u.cache_write) == (70, 20)
+
+
 def test_normalize_kong_flat_shape() -> None:
     u = normalize_usage({"prompt_tokens": 50, "completion_tokens": 5, "cached_tokens": 40})
     assert u == NormalizedUsage(50, 5, 40, None, input_includes_cache=True)
