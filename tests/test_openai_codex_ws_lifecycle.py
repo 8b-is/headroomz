@@ -2335,3 +2335,72 @@ async def test_ws_session_metrics_track_model_per_response_create():
         "model-a",
         "model-b",
     ]
+
+
+@pytest.mark.asyncio
+async def test_ws_turn_hook_savings_reach_the_turn_outcome():
+    """A turn hook's savings on a Codex WS turn must reach that turn's outcome.
+
+    The WS path compressed without ``savings_tags``, so ``ctx.record_savings``
+    wrote into a throwaway dict and ``/stats`` never saw the attribution.
+    """
+    from headroom.proxy.savings_attribution import from_tags
+    from headroom.proxy.turn_hooks import clear_turn_hooks, register_turn_hook
+
+    class _DropOldInput:
+        name = "drop_old_input"
+        savings_source = "ws_fold"
+        stream_safe = True
+
+        def on_request(self, ctx: SimpleNamespace) -> None:
+            del ctx.messages[:-1]
+
+    first = json.dumps(
+        {
+            "type": "response.create",
+            "response": {
+                "model": "gpt-5.4",
+                "input": [
+                    {"type": "message", "role": "user", "content": "old " * 50},
+                    {"type": "message", "role": "user", "content": "new"},
+                ],
+            },
+        }
+    )
+    upstream = _FakeUpstream(
+        [
+            json.dumps({"type": "response.created", "response": {"id": "r_1"}}),
+            json.dumps(
+                {
+                    "type": "response.completed",
+                    "response": {
+                        "id": "r_1",
+                        "usage": {"input_tokens": 10, "output_tokens": 1},
+                    },
+                }
+            ),
+        ]
+    )
+    client_ws = _FakeWebSocket(frames=[first])
+    handler = _DummyOpenAIHandler()
+    handler.config.optimize = True
+    outcomes = []
+
+    async def _record_request_outcome(outcome):
+        outcomes.append(outcome)
+
+    handler._record_request_outcome = _record_request_outcome
+
+    clear_turn_hooks()
+    register_turn_hook(_DropOldInput())
+    try:
+        with patch.dict(sys.modules, {"websockets": _make_fake_websockets_module(upstream)}):
+            await handler.handle_openai_responses_ws(client_ws)
+    finally:
+        clear_turn_hooks()
+
+    sent = json.loads(upstream.sent[0])["response"]["input"]
+    assert [item["content"] for item in sent] == ["new"]  # the hook really ran
+    rows = [row for outcome in outcomes for row in from_tags(outcome.tags)]
+    assert [(row["source"], row["realized"]) for row in rows] == [("ws_fold", True)]
+    assert rows[0]["tokens"] > 0

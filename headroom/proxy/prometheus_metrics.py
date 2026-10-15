@@ -654,6 +654,23 @@ class PrometheusMetrics:
         if saved > 0:
             self.extension_savings[key] += saved
 
+    def extension_savings_by_source(self) -> dict[str, int]:
+        """Measured savings per source, as ``/stats`` reports ``extension_savings``.
+
+        Realized savings attribution rows (``ctx.record_savings`` from a turn
+        hook, ``record_scope_savings``) plus ``record_extension_savings`` totals.
+        A source with its own ``record_extension_savings`` total keeps that total
+        rather than adding both: a plugin may report through both APIs.
+        Estimated rows (``realized=False``) stay in ``savings.by_source`` only.
+        """
+        out = {
+            str(row["source"]): int(row["tokens"])
+            for row in list(self.savings_by_source.values())
+            if row["realized"] and int(row["tokens"]) > 0
+        }
+        out.update(self.extension_savings)
+        return out
+
     def record_compression_failed(self, reason: str) -> None:
         """Record one fail-open compression failure, bucketed by ``reason``.
 
