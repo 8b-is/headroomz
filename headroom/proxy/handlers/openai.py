@@ -1892,7 +1892,9 @@ class OpenAIHandlerMixin:
             logger.debug("[%s] Traffic learner (ws): %s", request_id, exc)
 
     @staticmethod
-    async def _run_ws_create_hooks(frame: Any, ws_headers: dict[str, str]) -> bool:
+    async def _run_ws_create_hooks(
+        frame: Any, ws_headers: dict[str, str], connection_id: str
+    ) -> bool:
         """Run ``on_responses_create`` on a WS create frame's inner payload.
 
         True when a hook changed it, so the caller re-serializes the frame.
@@ -1901,7 +1903,10 @@ class OpenAIHandlerMixin:
         if not isinstance(inner, dict):
             return False
         return await run_responses_create_hooks(
-            inner, headers=MappingProxyType(ws_headers), transport="websocket"
+            inner,
+            headers=MappingProxyType(ws_headers),
+            transport="websocket",
+            connection_id=connection_id,
         )
 
     @staticmethod
@@ -7524,7 +7529,9 @@ class OpenAIHandlerMixin:
                     "[%s] WS /v1/responses passthrough reason=bypass_header mutation=disabled",
                     request_id,
                 )
-            elif first_frame_is_create and await self._run_ws_create_hooks(body, ws_headers):
+            elif first_frame_is_create and await self._run_ws_create_hooks(
+                body, ws_headers, session_id
+            ):
                 first_msg_raw = json.dumps(body)
             if isinstance(body, dict) and body:
                 ws_response_body_for_store = (
@@ -8716,7 +8723,7 @@ class OpenAIHandlerMixin:
                                         "response", _inbound_frame_body
                                     )
                                     if not _ws_bypass and await self._run_ws_create_hooks(
-                                        _inbound_frame_body, ws_headers
+                                        _inbound_frame_body, ws_headers, session_id
                                     ):
                                         msg = json.dumps(_inbound_frame_body)
                                     current_response_input = _responses_input_to_items(

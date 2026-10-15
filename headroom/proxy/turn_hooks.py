@@ -99,12 +99,16 @@ class ResponsesCreate:
     ``body`` is a read-only view of the Responses payload (for a WebSocket
     ``response.create`` frame, the inner ``response`` object). ``headers``
     are the client's request headers, or the WebSocket handshake headers,
-    looked up by lowercase name.
+    looked up by lowercase name. ``connection_id`` names the WebSocket
+    connection the frame arrived on (``None`` over HTTP): a
+    ``previous_response_id`` chain lives within one connection, so it is the
+    key for anything a hook must hold across a chain's frames.
     """
 
     body: Mapping[str, Any]
     headers: Mapping[str, str]
     transport: Literal["http", "websocket"]
+    connection_id: str | None = None
 
 
 @runtime_checkable
@@ -312,6 +316,7 @@ async def run_responses_create_hooks(
     *,
     headers: Mapping[str, str],
     transport: Literal["http", "websocket"],
+    connection_id: str | None = None,
 ) -> bool:
     """Run every hook's ``on_responses_create`` and apply the final body to
     ``body`` in place. True if any hook replaced it.
@@ -325,7 +330,10 @@ async def run_responses_create_hooks(
         if fn is None:
             continue
         request = ResponsesCreate(
-            body=MappingProxyType(current), headers=headers, transport=transport
+            body=MappingProxyType(current),
+            headers=headers,
+            transport=transport,
+            connection_id=connection_id,
         )
         try:
             result = fn(request)

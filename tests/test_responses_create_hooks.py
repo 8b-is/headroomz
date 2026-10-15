@@ -41,11 +41,13 @@ class _Router:
 
     def __init__(self) -> None:
         self.seen: list[tuple[str, str, str | None]] = []
+        self.connections: list[str | None] = []
 
     async def on_responses_create(self, request: ResponsesCreate) -> dict:
         self.seen.append(
             (request.transport, str(request.body.get("model")), request.headers.get("user-agent"))
         )
+        self.connections.append(request.connection_id)
         return {**request.body, "model": "gpt-5.4-mini", "reasoning": {"effort": "low"}}
 
 
@@ -98,6 +100,8 @@ async def test_ws_create_frames_carry_the_hooks_model_and_effort_upstream() -> N
         ("websocket", "gpt-5.5", "codex-cli/0.5"),
         ("websocket", "gpt-5.5", "codex-cli/0.5"),
     ]
+    # One connection, one id: what a hook keys a previous_response_id chain on.
+    assert router.connections[0] and len(set(router.connections)) == 1
 
 
 @pytest.mark.asyncio
@@ -215,6 +219,7 @@ def test_http_body_carries_the_hooks_model_and_the_outcome_prices_it() -> None:
 
     assert resp.status_code == 200, resp.text
     assert router.seen == [("http", "gpt-5.5", "codex_exec/0.162.1")]
+    assert router.connections == [None]
     body, mutated = sent[0]
     assert body["model"] == "gpt-5.4-mini"
     assert body["reasoning"] == {"effort": "low"}
