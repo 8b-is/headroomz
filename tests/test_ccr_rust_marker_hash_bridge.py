@@ -140,9 +140,48 @@ def test_persist_failure_logs_no_exception_text_at_any_level(
 
     warnings = [r for r in records if r.levelno == logging.WARNING]
     assert len(warnings) == 1
-    assert "(diff, RuntimeError" in warnings[0].getMessage()
+    assert "(diff, <RuntimeError>)" in warnings[0].getMessage()
     assert "a" * 24 in warnings[0].getMessage()
     details = [r for r in records if r.levelno == logging.DEBUG]
     assert len(details) == 1
     assert "RuntimeError" in details[0].getMessage()
     assert "caused by ValueError" in details[0].getMessage()
+
+
+def test_persist_warning_stays_one_line_when_full_dump_is_on(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """HEADROOM_DEBUG_DUMP=full puts the traceback in DEBUG only, never the WARNING."""
+    import headroom.cache.compression_store as compression_store
+    import headroom.transforms.base as base
+
+    class _Store:
+        def store(self, *_args: object, **_kwargs: object) -> str:
+            raise RuntimeError("cannot store original")
+
+    monkeypatch.setenv("HEADROOM_DEBUG_DUMP", "full")
+    monkeypatch.setattr(compression_store, "get_compression_store", lambda: _Store())
+    records: list[logging.LogRecord] = []
+
+    class _Capture(logging.Handler):
+        def emit(self, record: logging.LogRecord) -> None:
+            records.append(record)
+
+    handler = _Capture(level=logging.DEBUG)
+    base.logger.addHandler(handler)
+    monkeypatch.setattr(base.logger, "level", logging.DEBUG)
+    try:
+        persist_rust_ccr_entry("original", "comp", "a" * 24, source="log")
+    finally:
+        base.logger.removeHandler(handler)
+
+    warnings = [r.getMessage() for r in records if r.levelno == logging.WARNING]
+    assert len(warnings) == 1
+    assert "(log, <RuntimeError>)" in warnings[0]
+    assert "\n" not in warnings[0]
+    assert "Traceback" not in warnings[0]
+    assert "cannot store original" not in warnings[0]
+    details = [r.getMessage() for r in records if r.levelno == logging.DEBUG]
+    assert len(details) == 1
+    assert "Traceback" in details[0]
+    assert "cannot store original" in details[0]

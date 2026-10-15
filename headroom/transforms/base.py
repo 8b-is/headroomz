@@ -7,7 +7,7 @@ from abc import ABC, abstractmethod
 from typing import Any
 
 from ..config import TransformResult
-from ..log_safety import describe_exception
+from ..log_safety import describe_exception, safe_id
 from ..tokenizer import Tokenizer
 
 logger = logging.getLogger(__name__)
@@ -29,8 +29,9 @@ def persist_rust_ccr_entry(original: str, compressed: str, cache_key: str, *, so
             "CCR store import failed (%s); cache_key %s won't persist: %s",
             source,
             cache_key,
-            describe_exception(e),
+            safe_id(e),
         )
+        logger.debug("CCR store import failure detail: %s", describe_exception(e))
         return
     try:
         store: Any = get_compression_store()
@@ -39,12 +40,13 @@ def persist_rust_ccr_entry(original: str, compressed: str, cache_key: str, *, so
         # key explicitly so retrieving the marker hash finds the entry (#816).
         store.store(original, compressed, explicit_hash=cache_key)
     except Exception as e:
-        # Store backends can echo the payload in errors, so no level logs it;
-        # describe_exception keeps only types and code locations.
+        # Store backends can echo the payload in errors. The WARNING names only
+        # the exception type; the DEBUG record has types and code locations, or
+        # the full traceback (payload included) once HEADROOM_DEBUG_DUMP=full.
         logger.warning(
             "CCR store write failed (%s, %s); cache_key %s remains in-marker only",
             source,
-            describe_exception(e),
+            safe_id(e),
             cache_key,
         )
         logger.debug("CCR store write failure detail: %s", describe_exception(e))
