@@ -549,7 +549,7 @@ async def emit_request_outcome(handler: Any, outcome: RequestOutcome) -> None:
 
     if outcome.savings_measure is not None:
         # Only a request the provider served becomes the next one's baseline.
-        get_item_ledger().settle(outcome.request_id, succeeded=outcome.status_code < 400)
+        get_item_ledger().settle(outcome.savings_measure, succeeded=outcome.status_code < 400)
 
     # A rejected turn must not feed the savings/cost/log success stats; that
     # would let a request the provider never billed inflate the save-rate.

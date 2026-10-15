@@ -6292,7 +6292,6 @@ class OpenAIHandlerMixin:
                     original,
                     responses_items(body),
                     tokenizer.count_text,
-                    request_id=request_id,
                 )
 
             try:

@@ -24,14 +24,10 @@ def _items(*texts: str) -> list[tuple[str, str]]:
     return [(t, t) for t in texts]
 
 
-_ids = iter(range(10**6))
-
-
 def _turn(ledger, original, sent, count=_words, *, succeeded=True):
     """Measure one request and settle it, as the outcome funnel does."""
-    rid = f"r{next(_ids)}"
-    m = ledger.measure("conv", original, sent, count, request_id=rid)
-    ledger.settle(rid, succeeded=succeeded)
+    m = ledger.measure("conv", original, sent, count)
+    ledger.settle(m, succeeded=succeeded)
     return m
 
 
@@ -119,11 +115,27 @@ def test_a_failed_request_does_not_become_the_baseline():
 def test_a_late_settling_older_turn_keeps_the_newer_baseline():
     ledger = ItemLedger()
     old, new = _items("[]", '"a"'), _items("[]", '"a"', '"b"')
-    ledger.measure("conv", old, old, _words, request_id="slow")
-    ledger.measure("conv", new, new, _words, request_id="fast")
-    ledger.settle("fast", succeeded=True)
-    ledger.settle("slow", succeeded=True)
+    slow = ledger.measure("conv", old, old, _words)
+    fast = ledger.measure("conv", new, new, _words)
+    ledger.settle(fast, succeeded=True)
+    ledger.settle(slow, succeeded=True)
     assert _turn(ledger, new, new).sent_shared_prefix == 3
+
+
+def test_requests_awaiting_their_outcome_are_bounded_by_items(monkeypatch):
+    monkeypatch.setattr(savings, "MAX_STORED_ITEMS", 4)
+    ledger = ItemLedger()
+    abandoned = ledger.measure("a", _items("[]", '"x"', '"y"'), _items("[]", '"x"', '"y"'), _words)
+    kept = ledger.measure("b", _items("[]", '"z"'), _items("[]", '"z"'), _words)
+    # The oldest pending request was forgotten; settling it is a no-op.
+    ledger.settle(abandoned, succeeded=True)
+    ledger.settle(kept, succeeded=True)
+    again = _items("[]", '"x"', '"y"')
+    assert ledger.measure("a", again, again, _words).sent_shared_prefix == 0
+    assert (
+        ledger.measure("b", _items("[]", '"z"'), _items("[]", '"z"'), _words).sent_shared_prefix
+        == 2
+    )
 
 
 def test_messages_stand_in_for_input():

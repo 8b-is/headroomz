@@ -38,7 +38,7 @@ import logging
 import threading
 from collections import OrderedDict
 from collections.abc import Callable, Sequence
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Any
 
 from headroom.log_safety import describe_exception, safe_id
@@ -92,6 +92,8 @@ class ItemMeasure:
     #: False when Headroom changed the item count and the original/sent pairing
     #: had to be approximated: the totals are exact, the old/new split is not.
     aligned: bool = True
+    #: Which measured request this is, for :meth:`ItemLedger.settle`.
+    ticket: int = field(default=0, compare=False)
 
     @property
     def removed(self) -> int:
@@ -259,19 +261,17 @@ def _align(
     return pairs, False
 
 
-#: Measured requests awaiting their outcome. A request whose outcome never
-#: arrives (a dropped connection) is forgotten once this many are newer.
-MAX_PENDING_REQUESTS = 4096
-
-
 class ItemLedger:
     """The previous request of each conversation, for the old/new item split.
 
     One instance per process. A request is measured against the conversation's
     last SUCCESSFUL request and becomes the baseline only once its own outcome
     succeeds (:meth:`settle`): a failed call never reached the provider's cache.
-    Requests are sequenced at measure time, so a slow earlier turn settling
-    late cannot replace a newer turn's baseline. Items re-sent from the
+    Each measure carries a ticket, issued in measure order, so a slow earlier
+    turn settling late cannot replace a newer turn's baseline. Requests still
+    awaiting their outcome count toward :data:`MAX_STORED_ITEMS` too; past it
+    the oldest are forgotten, which only leaves their conversation on its
+    previous baseline. Items re-sent from the
     baseline reuse its token counts, so a long transcript is tokenized once
     rather than every turn.
     """
@@ -279,8 +279,9 @@ class ItemLedger:
     def __init__(self) -> None:
         self._lock = threading.Lock()
         self._previous: OrderedDict[str, tuple[int, list[ItemCounts]]] = OrderedDict()
-        self._pending: OrderedDict[str, tuple[str, int, list[ItemCounts]]] = OrderedDict()
+        self._pending: OrderedDict[int, tuple[str, list[ItemCounts]]] = OrderedDict()
         self._stored = 0
+        self._pending_items = 0
         self._seq = 0
 
     def measure(
@@ -289,8 +290,6 @@ class ItemLedger:
         original: Sequence[Item],
         sent: Sequence[Item],
         count: Callable[[str], int],
-        *,
-        request_id: str,
     ) -> ItemMeasure:
         """Measure one request against ``key``'s baseline; settle it later."""
         with self._lock:
@@ -315,19 +314,24 @@ class ItemLedger:
 
         items, aligned = _align(counted(original), counted(sent), previous)
         with self._lock:
-            self._pending[request_id] = (key, seq, items)
-            while len(self._pending) > MAX_PENDING_REQUESTS:
-                self._pending.popitem(last=False)
-        measure = measure_items(items, previous)
-        return measure if aligned else replace(measure, aligned=False)
+            self._pending[seq] = (key, items)
+            self._pending_items += len(items)
+            while self._pending_items > MAX_STORED_ITEMS and len(self._pending) > 1:
+                _, (_, dropped) = self._pending.popitem(last=False)
+                self._pending_items -= len(dropped)
+        return replace(measure_items(items, previous), aligned=aligned, ticket=seq)
 
-    def settle(self, request_id: str, *, succeeded: bool) -> None:
+    def settle(self, measure: ItemMeasure, *, succeeded: bool) -> None:
         """Make a measured request its conversation's baseline if it succeeded."""
+        seq = measure.ticket
         with self._lock:
-            pending = self._pending.pop(request_id, None)
-            if pending is None or not succeeded:
+            pending = self._pending.pop(seq, None)
+            if pending is None:
                 return
-            key, seq, items = pending
+            key, items = pending
+            self._pending_items -= len(items)
+            if not succeeded:
+                return
             current = self._previous.get(key)
             if current is not None and current[0] > seq:
                 return
