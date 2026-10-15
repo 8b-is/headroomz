@@ -448,6 +448,17 @@ def test_normalize_openai_responses_shape() -> None:
     assert u == NormalizedUsage(10, 2, 8, None, input_includes_cache=True)
 
 
+def test_normalize_openai_responses_reported_cache_writes() -> None:
+    u = normalize_usage(
+        {
+            "input_tokens": 10,
+            "output_tokens": 2,
+            "input_tokens_details": {"cached_tokens": 6, "cache_write_tokens": 3},
+        }
+    )
+    assert u == NormalizedUsage(10, 2, 6, 3, input_includes_cache=True)
+
+
 def test_normalize_kong_flat_shape() -> None:
     u = normalize_usage({"prompt_tokens": 50, "completion_tokens": 5, "cached_tokens": 40})
     assert u == NormalizedUsage(50, 5, 40, None, input_includes_cache=True)

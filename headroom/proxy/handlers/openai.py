@@ -346,13 +346,22 @@ class TurnHookUsage:
     the safe direction for a bill.
     """
 
-    __slots__ = ("_seen", "input_tokens", "output_tokens", "cache_read_tokens", "extra_calls")
+    __slots__ = (
+        "_seen",
+        "input_tokens",
+        "output_tokens",
+        "cache_read_tokens",
+        "cache_write_tokens",
+        "extra_calls",
+    )
 
     def __init__(self) -> None:
-        self._seen: list[tuple[int, Any, int, int, int]] = []
+        self._seen: list[tuple[int, Any, int, int, int, int]] = []
         self.input_tokens = 0
         self.output_tokens = 0
         self.cache_read_tokens = 0
+        #: Reported (Responses ``cache_write_tokens``) writes only; 0 otherwise.
+        self.cache_write_tokens = 0
         self.extra_calls = 0
 
     def record(
@@ -376,17 +385,19 @@ class TurnHookUsage:
                 usage_int(usage.get(input_key)),
                 usage_int(usage.get(output_key)),
                 cached,
+                _reported_cache_write(details) or 0,
             )
         else:
-            entry = (id(payload), payload, 0, 0, 0)
+            entry = (id(payload), payload, 0, 0, 0, 0)
         self._seen.append(entry)
 
     def settle(self, final: Any) -> None:
         """Total everything except ``final``, which the usage block will read."""
         self.input_tokens = self.output_tokens = self.cache_read_tokens = 0
+        self.cache_write_tokens = 0
         self.extra_calls = 0
         dropped = False
-        for _ident, payload, tin, tout, cached in self._seen:
+        for _ident, payload, tin, tout, cached, written in self._seen:
             if not dropped and payload is final:
                 dropped = True
                 continue
@@ -394,6 +405,7 @@ class TurnHookUsage:
             self.input_tokens += tin
             self.output_tokens += tout
             self.cache_read_tokens += cached
+            self.cache_write_tokens += written
 
 
 def _sanitize_forwarded_response_headers(
@@ -1651,7 +1663,23 @@ def _infer_openai_cache_write_tokens(input_tokens: int, cache_read_tokens: int) 
     return max(input_tokens - cache_read_tokens, 0)
 
 
-def _openai_responses_cache_split(input_tokens: int, details: Any) -> tuple[int, int, int, bool]:
+def _reported_cache_write(details: Any) -> int | None:
+    """``input_tokens_details.cache_write_tokens``, or ``None`` when not reported."""
+    if not isinstance(details, dict) or details.get("cache_write_tokens") is None:
+        return None
+    return usage_int(details.get("cache_write_tokens"))
+
+
+def _hook_reported_write(final_write: int | None, hook_usage: Any) -> int | None:
+    """The final response's reported write plus any turn-hook re-drives' writes."""
+    if final_write is None:
+        return None
+    return final_write + (hook_usage.cache_write_tokens if hook_usage.extra_calls else 0)
+
+
+def _openai_responses_cache_split(
+    input_tokens: int, cached: int, reported_write: int | None
+) -> tuple[int, int, int, bool]:
     """Split a Responses ``input_tokens`` total into ``(read, write, uncached, inferred)``.
 
     Responses usage now reports cache writes itself as
@@ -1661,11 +1689,8 @@ def _openai_responses_cache_split(input_tokens: int, details: Any) -> tuple[int,
     inferred from the uncached slice and flagged, so pricing drops it rather
     than billing the same tokens twice.
     """
-    details = details if isinstance(details, dict) else {}
-    cached = usage_int(details.get("cached_tokens"))
-    if details.get("cache_write_tokens") is not None:
-        write = usage_int(details.get("cache_write_tokens"))
-        return cached, write, max(input_tokens - cached - write, 0), False
+    if reported_write is not None:
+        return cached, reported_write, max(input_tokens - cached - reported_write, 0), False
     return (
         cached,
         _infer_openai_cache_write_tokens(input_tokens, cached),
@@ -1717,8 +1742,11 @@ def _extract_responses_usage(event: dict[str, Any]) -> tuple[int, int, int, int,
 
     input_tokens = usage_int(usage.get("input_tokens"))
     output_tokens = usage_int(usage.get("output_tokens"))
+    details = usage.get("input_tokens_details")
     cached, write, uncached, inferred = _openai_responses_cache_split(
-        input_tokens, usage.get("input_tokens_details")
+        input_tokens,
+        usage_int(details.get("cached_tokens")) if isinstance(details, dict) else 0,
+        _reported_cache_write(details),
     )
     return input_tokens, output_tokens, cached, write, uncached, inferred
 
@@ -6740,10 +6768,8 @@ class OpenAIHandlerMixin:
                         cache_inferred,
                     ) = _openai_responses_cache_split(
                         total_input_tokens,
-                        {
-                            **(details if isinstance(details, dict) else {}),
-                            "cached_tokens": cache_read_tokens,
-                        },
+                        cache_read_tokens,
+                        _hook_reported_write(_reported_cache_write(details), _resp_hook_usage),
                     )
 
                     # Was: optimized := provider count, then original := max(original,
@@ -7548,7 +7574,9 @@ class OpenAIHandlerMixin:
             ws_cache_write_tokens_total = 0
             ws_uncached_input_tokens_total = 0
             # Whether the latest usage frame's write was inferred rather than
-            # reported (see _openai_responses_cache_split).
+            # reported (see _openai_responses_cache_split). One flag for the
+            # summed deltas: a session that mixed reported and unreported
+            # frames would misprice one kind, which Codex does not do.
             ws_cache_inferred = True
             ws_recorded_input_tokens_total = 0
             ws_recorded_output_tokens_total = 0
@@ -9548,6 +9576,7 @@ class OpenAIHandlerMixin:
                     fb_cache_read_tokens,
                     fb_cache_write_tokens,
                     fb_uncached_tokens,
+                    ws_cache_inferred,
                 ) = await self._ws_http_fallback(
                     websocket, body, first_msg_raw, upstream_headers, request_id
                 )
@@ -9826,7 +9855,7 @@ class OpenAIHandlerMixin:
         first_msg_raw: str,
         upstream_headers: dict[str, str],
         request_id: str,
-    ) -> tuple[int, int, int, int, int]:
+    ) -> tuple[int, int, int, int, int, bool]:
         """Fall back to HTTP POST streaming when upstream WS fails.
 
         Converts the WS ``response.create`` message to an HTTP POST to
@@ -9840,7 +9869,9 @@ class OpenAIHandlerMixin:
         authoritative wire-token count; otherwise a fallback recorded
         ``input_tokens=0`` and savings percentages blew past 100 (#2957).
         """
-        fallback_usage = [0, 0, 0, 0, 0]
+        # Five summed counters, then whether the latest frame's write was
+        # inferred (see _openai_responses_cache_split).
+        fallback_usage: list[int] = [0, 0, 0, 0, 0, True]
 
         def _accumulate_usage(data_str: str) -> None:
             try:
@@ -9848,9 +9879,10 @@ class OpenAIHandlerMixin:
             except (json.JSONDecodeError, TypeError):
                 return
             if isinstance(event, dict) and event.get("type") == "response.completed":
-                # The fallback reports totals only; its writes stay inferred.
-                for i, value in enumerate(_extract_responses_usage(event)[:5]):
+                usage = _extract_responses_usage(event)
+                for i, value in enumerate(usage[:5]):
                     fallback_usage[i] += value
+                fallback_usage[5] = usage[5]
 
         # Route to correct endpoint based on auth mode
         is_chatgpt_fallback = has_chatgpt_account_header(upstream_headers)

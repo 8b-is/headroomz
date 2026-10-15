@@ -899,6 +899,9 @@ async def test_ws_session_metrics_include_response_completed_usage():
     assert recorded["cache_read_tokens"] == 75
     assert recorded["cache_write_tokens"] == 25
     assert recorded["uncached_input_tokens"] == 25
+    # The write above is the uncached slice, not a billed write: flagged, or
+    # pricing bills those 25 tokens twice.
+    assert recorded["cache_inferred"] is True
 
 
 @pytest.mark.asyncio
