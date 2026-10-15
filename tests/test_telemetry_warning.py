@@ -69,15 +69,14 @@ def test_buffered_session_is_not_sent_after_telemetry_off(monkeypatch):
         monkeypatch.delenv(var, raising=False)
     sent: list[dict] = []
     monkeypatch.setattr(S, "_post_blocking", lambda payload, **kwargs: sent.append(payload))
-    aggregator = S.SessionAggregator(S.post_session_event)
+    aggregator = S.SessionAggregator(S.post_session_event, idle_s=900.0, flush_s=100.0)
     monkeypatch.setattr(S, "_aggregator", aggregator)
-    aggregator.record(
-        SimpleNamespace(provider="openai", model="gpt-5.4", tokens_saved=10, tags={}),
-        now=1_000.0,
-    )
+    outcome = SimpleNamespace(provider="openai", model="gpt-5.4", tokens_saved=10, tags={})
+    aggregator.record(outcome, now=1_000.0)
     monkeypatch.setenv("HEADROOM_TELEMETRY", "off")
 
-    S.post_session_event({"event": "session"})
+    aggregator.record(outcome, now=1_150.0)  # past flush_s: heartbeat
+    aggregator.record(outcome, now=3_000.0)  # past idle_s: idle close
     S._flush_at_exit()
 
     assert sent == []
