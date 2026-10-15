@@ -158,10 +158,12 @@ class TurnHook(Protocol):
 
         Everything after it -- memory, compression, tool-search deferral,
         token counting, pricing, metrics, the WS continuation template -- sees
-        the replacement; the next hook gets it as its ``request.body``. A hook
-        never edits the body in place, so one that raises leaves nothing
-        half-applied, and a request no hook replaced keeps the client's
-        original bytes. Keep it fast: it is awaited inline on every frame, so
+        the replacement; the next hook gets it as its ``request.body``. The
+        view is read-only at the top level and nested values are shared with
+        the live request, so build replacements (``{**body, "reasoning":
+        {...}}``) rather than mutating nested dicts or lists. A hook that
+        raises then leaves nothing half-applied, and a request no hook
+        replaced keeps the client's original bytes. Keep it fast: it is awaited inline on every frame, so
         no network I/O."""
 
 
