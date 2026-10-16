@@ -212,6 +212,7 @@ def test_items_split_into_old_and_new_against_the_previous_request():
         removed_new=3_000 - 60,
         sent_shared_prefix=700,
         bust=250,
+        grown_new=60,
     )
 
 
@@ -335,3 +336,33 @@ def test_a_disproved_minimum_still_writes_nothing_smaller_than_was_cached():
     record = compute_savings_record(measure, usage, model="haiku", provider="anthropic")
     reads = 2_000 + -2_500 * (2 / 3)
     assert record.counterfactual_input_cost_usd == pytest.approx(reads * READ + (500 - reads) * IN)
+
+
+def test_a_lost_baseline_prices_the_new_removal_at_the_read_floor():
+    """With the conversation's baseline evicted, the new items may be old ones
+    the provider had cached. Pricing them as new, at the miss rate, booked
+    $0.2236 here; the read rate, the floor of any input token, books $0.0152.
+    The 1,000 tokens Headroom added to a new item still cost the miss rate."""
+    lost = ItemMeasure(
+        sent_tokens=95_000,
+        removed_old=0,
+        removed_new=60_000 - 1_000,
+        sent_shared_prefix=0,
+        bust=0,
+        aligned=False,
+        baseline_lost=True,
+        grown_new=1_000,
+    )
+    k, p_miss = 100_000 / 95_000, 0.8 * WRITE + 0.2 * IN
+    as_new = compute_savings_record(
+        dataclasses.replace(lost, baseline_lost=False), WARM, model="sonnet", provider="anthropic"
+    )
+    assert as_new.saved_usd == pytest.approx(k * 59_000 * p_miss)  # $0.2236
+
+    record = compute_savings_record(lost, WARM, model="sonnet", provider="anthropic")
+    assert record.saved_usd == pytest.approx(k * 60_000 * READ - k * 1_000 * p_miss)  # $0.0152
+    assert record.saved_usd == pytest.approx(0.015158, abs=1e-6)
+    assert record.estimated
+    # Without usage too: list price for the rest, the read rate for the removal.
+    unbilled = compute_savings_record(lost, None, model="sonnet", provider="anthropic")
+    assert unbilled.saved_usd == pytest.approx(60_000 * READ - 1_000 * IN)
