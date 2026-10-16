@@ -182,23 +182,35 @@ def test_settled_and_pending_items_share_one_budget(monkeypatch):
     assert ledger.measure("conv", idle, idle, _words).sent_shared_prefix == 0
 
 
-def test_a_request_larger_than_the_budget_is_measured_but_never_kept(monkeypatch):
-    """It cannot become the next baseline, so the conversation keeps the last
-    one that fit (a shorter shared prefix, which errs toward the miss rate) and
-    the records it feeds are marked estimated. Other conversations keep theirs."""
+def test_a_request_larger_than_the_budget_is_kept_up_to_the_budget(monkeypatch):
+    """Keeping nothing would freeze the baseline and price every later item
+    as new, at the miss rate, which overstates the saving. The first items are
+    kept instead, and records measured against them are marked estimated."""
     monkeypatch.setattr(savings, "MAX_STORED_ITEMS", 4)
     ledger = ItemLedger()
-    other = _items("[]")
-    ledger.settle(ledger.measure("other", other, other, _words), succeeded=True)
     base = _items("[]", '"s"', '"u1"')
     _turn(ledger, base, base)
     grown = [*base, *_items('"u2"', '"u3"')]
     m = _turn(ledger, grown, grown)
-    assert (m.sent_shared_prefix, m.aligned) == (3, False)
+    # Measured exactly against the baseline that fit.
+    assert (m.sent_shared_prefix, m.aligned) == (3, True)
     longer = [*grown, *_items('"u4"')]
     m = _turn(ledger, longer, longer)
-    assert (m.sent_shared_prefix, m.aligned) == (3, False)
-    assert ledger.measure("other", other, other, _words).sent_shared_prefix == 1
+    assert (m.sent_shared_prefix, m.aligned) == (4, False)
+    assert ledger._stored + ledger._pending_items <= 4
+
+
+def test_a_measure_that_fails_releases_its_slot():
+    """The caller logs a failed measure and never settles it."""
+    ledger = ItemLedger()
+
+    def broken(text: str) -> int:
+        raise ValueError("tokenizer failed")
+
+    for _ in range(3):
+        with pytest.raises(ValueError):
+            ledger.measure("conv", _items("[]"), _items("[]"), broken)
+    assert not ledger._pending
 
 
 def test_messages_stand_in_for_input():

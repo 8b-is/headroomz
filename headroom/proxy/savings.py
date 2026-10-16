@@ -91,8 +91,8 @@ class ItemMeasure:
     bust: int
     #: False when the old/new split is approximate (the totals stay exact):
     #: Headroom changed the item count and the original/sent pairing had to be
-    #: approximated, or the request is too large for :class:`ItemLedger` to
-    #: keep, so it and its successors are measured against an older baseline.
+    #: approximated, or the baseline may have been truncated to
+    #: :data:`MAX_STORED_ITEMS` items, so later old items count as new.
     aligned: bool = True
     #: Which measured request this is, for :meth:`ItemLedger.settle`.
     ticket: int = field(default=0, compare=False)
@@ -281,10 +281,14 @@ class ItemLedger:
     the ticket is issued, so a slow measure keeps its place), a baseline by
     the last ticket that used it. A forgotten pending request leaves its
     conversation on its previous baseline; a forgotten baseline leaves the
-    conversation's next request with none. A single request with more items
-    than the whole budget is measured but never kept: its conversation keeps
-    the last baseline that fit, and since a conversation only grows, every
-    such request is marked ``aligned=False`` (its record is estimated).
+    conversation's next request with none. Settling counts as a use. A
+    request with more items than the whole budget is measured exactly but
+    kept only up to its first :data:`MAX_STORED_ITEMS` items: the comparison
+    is a prefix, so the next request still gets the shared-prefix credit for
+    all of them and only the items past the cap are priced as new. A request
+    measured against a baseline of exactly that size is marked
+    ``aligned=False`` (its record is estimated), since the baseline may be
+    truncated.
     """
 
     def __init__(self) -> None:
@@ -329,14 +333,21 @@ class ItemLedger:
                 out.append((digest, tokens))
             return out
 
-        items, aligned = _align(counted(original), counted(sent), previous)
-        with self._lock:
-            if len(items) > MAX_STORED_ITEMS:
+        try:
+            items, aligned = _align(counted(original), counted(sent), previous)
+        except BaseException:
+            # The caller logs and never settles: release the reserved slot.
+            with self._lock:
                 self._pending.pop(seq, None)
-                aligned = False
-            elif seq in self._pending:  # not already evicted while counting
-                self._pending[seq] = (key, items)
-                self._pending_items += len(items)
+            raise
+        if previous is not None and len(previous) == MAX_STORED_ITEMS:
+            # Possibly a truncated baseline: items past it count as new.
+            aligned = False
+        with self._lock:
+            if seq in self._pending:  # not already evicted while counting
+                kept = items[:MAX_STORED_ITEMS]
+                self._pending[seq] = (key, kept)
+                self._pending_items += len(kept)
                 self._evict()
         return replace(measure_items(items, previous), aligned=aligned, ticket=seq)
 
@@ -363,14 +374,15 @@ class ItemLedger:
     def _evict(self) -> None:
         """Forget the least recent entries until the combined budget holds.
 
-        Called with the lock held. Terminates: the entry just admitted fits
-        the budget on its own.
+        Called with the lock held. Each pass removes one entry, so the loop
+        ends; the entry just admitted may be the one removed.
         """
         while self._stored + self._pending_items > MAX_STORED_ITEMS:
             oldest_ticket = next(iter(self._pending), None)
             oldest_key = next(iter(self._previous), None)
+            # On a tie the baseline goes: the request that used it is newer.
             if oldest_key is not None and (
-                oldest_ticket is None or self._previous[oldest_key][2] < oldest_ticket
+                oldest_ticket is None or self._previous[oldest_key][2] <= oldest_ticket
             ):
                 _, (_, evicted, _) = self._previous.popitem(last=False)
                 self._stored -= len(evicted)
