@@ -2407,3 +2407,128 @@ async def test_ws_turn_hook_savings_reach_the_turn_outcome(usage, expected):
     rows = [row for outcome in outcomes for row in from_tags(outcome.tags)]
     assert [(row["source"], row["realized"]) for row in rows] == expected
     assert all(row["tokens"] > 0 for row in rows)
+
+
+class _UpstreamAfterSends(_FakeUpstream):
+    """Streams its events only once ``sends`` frames reached it, so every frame's
+    savings are pending before the one usage-carrying outcome claims them."""
+
+    def __init__(self, events: list[str], *, sends: int) -> None:
+        super().__init__(events)
+        self._sends = sends
+
+    async def _iter(self):
+        while len(self.sent) < self._sends:
+            await asyncio.sleep(0)
+        for ev in self._events:
+            yield ev
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("sources_per_frame", "expected_rows"),
+    [(lambda i: "tool_search", 2), (lambda i: f"src{i}", 29)],
+    ids=["repeated_source", "distinct_sources"],
+)
+async def test_ws_pending_savings_beyond_max_sources_are_all_booked(
+    sources_per_frame, expected_rows
+):
+    """33 frames each booking 100 tokens must hand 3,300 tokens to the outcome.
+
+    The session-wide pending list grew by each frame's rows (here a ``ws_fold``
+    row and a 100-token hook row) and the outcome funnel reads at most
+    ``MAX_SOURCES`` rows, so 66 rows were cut to 32 and the rest cleared
+    unbooked (1,600 of 3,300). Pending rows now coalesce per (source, realized,
+    estimated) and distinct sources past the cap fold into ``other``.
+    """
+    from headroom.proxy.prometheus_metrics import PrometheusMetrics
+    from headroom.proxy.savings_attribution import (
+        MAX_SOURCES,
+        SAVINGS_ATTRIBUTION_TAG,
+        from_tags,
+    )
+    from headroom.proxy.turn_hooks import clear_turn_hooks, register_turn_hook
+
+    frames_n = MAX_SOURCES + 1
+    seen = {"frame": 0}
+
+    class _DeferTools:
+        name = "defer_tools"
+        savings_source = "ws_fold"
+        stream_safe = True
+
+        def on_request(self, ctx: SimpleNamespace) -> None:
+            del ctx.messages[:-1]
+            ctx.record_savings(sources_per_frame(seen["frame"]), tokens=100)
+            seen["frame"] += 1
+
+    def _frame(i: int) -> str:
+        return json.dumps(
+            {
+                "type": "response.create",
+                "response": {
+                    "model": "gpt-5.4",
+                    "input": [
+                        {"type": "message", "role": "user", "content": f"old {i} " * 50},
+                        {"type": "message", "role": "user", "content": f"new {i}"},
+                    ],
+                },
+            }
+        )
+
+    upstream = _UpstreamAfterSends(
+        [
+            json.dumps({"type": "response.created", "response": {"id": "r_1"}}),
+            json.dumps(
+                {
+                    "type": "response.completed",
+                    "response": {
+                        "id": "r_1",
+                        "usage": {"input_tokens": 10, "output_tokens": 1},
+                    },
+                }
+            ),
+        ],
+        sends=frames_n,
+    )
+    client_ws = _FakeWebSocket(frames=[_frame(i) for i in range(frames_n)])
+    handler = _DummyOpenAIHandler()
+    handler.config.optimize = True
+    outcomes = []
+
+    async def _record_request_outcome(outcome):
+        outcomes.append(outcome)
+
+    handler._record_request_outcome = _record_request_outcome
+
+    clear_turn_hooks()
+    register_turn_hook(_DeferTools())
+    try:
+        with patch.dict(sys.modules, {"websockets": _make_fake_websockets_module(upstream)}):
+            await handler.handle_openai_responses_ws(client_ws)
+    finally:
+        clear_turn_hooks()
+
+    assert len(upstream.sent) == frames_n
+    assert seen["frame"] == frames_n
+    metrics = PrometheusMetrics()
+    stored = []
+    for outcome in outcomes:
+        rows = from_tags(outcome.tags)
+        stored.append(len(outcome.tags.get(SAVINGS_ATTRIBUTION_TAG, [])))
+        await metrics.record_request(
+            provider="openai",
+            model="gpt-5.4",
+            input_tokens=10,
+            output_tokens=1,
+            tokens_saved=0,
+            latency_ms=1.0,
+            savings_attribution=rows,
+        )
+    booked = sum(
+        int(row["tokens"])
+        for row in metrics.savings_by_source.values()
+        if row["source"] != "ws_fold"
+    )
+    assert booked == 100 * frames_n
+    assert stored == [expected_rows]

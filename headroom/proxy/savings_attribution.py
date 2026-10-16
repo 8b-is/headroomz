@@ -203,6 +203,47 @@ def from_tags(tags: MutableMapping[str, Any] | None) -> list[dict[str, Any]]:
     return [dict(item) for item in raw[:MAX_SOURCES] if isinstance(item, dict)]
 
 
+# One "other" row per (realized, estimated) pair is kept free, so overflow is
+# summed rather than dropped.
+_OVERFLOW_SLOTS = 4
+
+
+def accumulate(pending: list[dict[str, Any]], items: list[dict[str, Any]]) -> None:
+    """Add ``items`` to ``pending`` in at most ``MAX_SOURCES`` rows, conserving totals.
+
+    For a ledger that outlives one request: a WS session holds rows until a
+    usage-carrying turn claims them, and :func:`from_tags` reads only the first
+    ``MAX_SOURCES``. Rows with the same (source, realized, estimated) sum into
+    one; a new source past the cap sums into that pair's ``other`` row.
+    ``details`` stay only while every summed row agrees on them.
+    """
+    for item in items:
+        key = _key(item)
+        target = _row_for(pending, key)
+        if target is None and len(pending) >= MAX_SOURCES - _OVERFLOW_SLOTS:
+            key = ("other", key[1], key[2])
+            target = _row_for(pending, key)
+            item = {k: v for k, v in item.items() if k != "details"}
+        if target is None:
+            pending.append({**item, "source": key[0]})
+            continue
+        target["tokens"] = int(target.get("tokens", 0)) + int(item.get("tokens", 0) or 0)
+        target["usd"] = round(
+            float(target.get("usd", 0.0)) + float(item.get("usd", 0.0) or 0.0), 12
+        )
+        if target.get("details") != item.get("details"):
+            target.pop("details", None)
+
+
+def _key(row: dict[str, Any]) -> tuple[str, bool, bool]:
+    # ``realized`` defaults to True, as in every consumer of these rows.
+    return (str(row.get("source")), bool(row.get("realized", True)), bool(row.get("estimated")))
+
+
+def _row_for(rows: list[dict[str, Any]], key: tuple[str, bool, bool]) -> dict[str, Any] | None:
+    return next((row for row in rows if _key(row) == key), None)
+
+
 _INTERNAL_TAGS = frozenset({SAVINGS_ATTRIBUTION_TAG, STAGE_TIMING_TAG})
 
 

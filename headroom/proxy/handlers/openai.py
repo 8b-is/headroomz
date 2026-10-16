@@ -44,6 +44,7 @@ from headroom.proxy.provider_usage import (
 )
 from headroom.proxy.rate_limit_identity import rate_limit_identity
 from headroom.proxy.savings_attribution import SAVINGS_ATTRIBUTION_TAG
+from headroom.proxy.savings_attribution import accumulate as accumulate_savings
 from headroom.proxy.savings_attribution import from_tags as savings_from_tags
 from headroom.proxy.semantic_cache_key_policy import compute_request_cache_partition
 from headroom.proxy.stage_timer import StageTimer, emit_stage_timings_log
@@ -7028,6 +7029,7 @@ class OpenAIHandlerMixin:
         # that were rewritten and sent, waiting for the next turn's outcome. Each
         # frame compresses into its own dict: a timed-out compression thread
         # keeps running and must not book rows for a frame sent uncompressed.
+        # Bounded by ``accumulate_savings`` so ``from_tags`` reads every row.
         ws_turn_savings: list[dict[str, Any]] = []
 
         # Extract subprotocol from client — this is an application-level negotiation
@@ -8104,7 +8106,9 @@ class OpenAIHandlerMixin:
                                 )
                                 _record_ws_compression_overhead(_rewrite_ms)
                                 tokens_saved += int(_ws_saved)
-                                ws_turn_savings.extend(savings_from_tags(_frame_savings))
+                                accumulate_savings(
+                                    ws_turn_savings, savings_from_tags(_frame_savings)
+                                )
                                 ws_conversation_tokens_saved = int(_ws_saved)
                                 ws_conversation_key = savings_conversation_key(
                                     _send_body, session_id=f"ws:{session_id}"
@@ -8601,7 +8605,7 @@ class OpenAIHandlerMixin:
                         )
                         _record_ws_compression_overhead(_rewrite_ms)
                         tokens_saved += int(frame_saved)
-                        ws_turn_savings.extend(savings_from_tags(frame_savings))
+                        accumulate_savings(ws_turn_savings, savings_from_tags(frame_savings))
                         ws_conversation_tokens_saved = int(frame_saved)
                         ws_conversation_key = savings_conversation_key(
                             new_inner, session_id=f"ws:{session_id}"
