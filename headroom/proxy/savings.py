@@ -89,8 +89,10 @@ class ItemMeasure:
     #: Sent tokens of old items that fell outside the sent shared prefix: cache
     #: misses caused only by Headroom changing what it had sent before.
     bust: int
-    #: False when Headroom changed the item count and the original/sent pairing
-    #: had to be approximated: the totals are exact, the old/new split is not.
+    #: False when the old/new split is approximate (the totals stay exact):
+    #: Headroom changed the item count and the original/sent pairing had to be
+    #: approximated, or the request is too large for :class:`ItemLedger` to
+    #: keep, so it and its successors are measured against an older baseline.
     aligned: bool = True
     #: Which measured request this is, for :meth:`ItemLedger.settle`.
     ticket: int = field(default=0, compare=False)
@@ -200,8 +202,9 @@ def _digest(text: str) -> str:
     return hashlib.blake2b(text.encode("utf-8", errors="replace"), digest_size=8).hexdigest()
 
 
-#: Items kept across all conversations' previous requests. A long Codex
-#: session carries 1000+ items; bounding items, not conversations, bounds memory.
+#: Items kept across all conversations' baselines and requests awaiting their
+#: outcome, combined. A long Codex session carries 1000+ items; bounding items,
+#: not conversations, bounds memory.
 MAX_STORED_ITEMS = 100_000
 
 
@@ -268,17 +271,27 @@ class ItemLedger:
     last SUCCESSFUL request and becomes the baseline only once its own outcome
     succeeds (:meth:`settle`): a failed call never reached the provider's cache.
     Each measure carries a ticket, issued in measure order, so a slow earlier
-    turn settling late cannot replace a newer turn's baseline. Requests still
-    awaiting their outcome count toward :data:`MAX_STORED_ITEMS` too; past it
-    the oldest are forgotten, which only leaves their conversation on its
-    previous baseline. Items re-sent from the
-    baseline reuse its token counts, so a long transcript is tokenized once
-    rather than every turn.
+    turn settling late cannot replace a newer turn's baseline. Items re-sent
+    from the baseline reuse its token counts, so a long transcript is
+    tokenized once rather than every turn.
+
+    Baselines and requests awaiting their outcome share one budget,
+    :data:`MAX_STORED_ITEMS`. Past it, whichever is least recent goes first,
+    by ticket: a pending request by its own ticket (its slot is reserved when
+    the ticket is issued, so a slow measure keeps its place), a baseline by
+    the last ticket that used it. A forgotten pending request leaves its
+    conversation on its previous baseline; a forgotten baseline leaves the
+    conversation's next request with none. A single request with more items
+    than the whole budget is measured but never kept: its conversation keeps
+    the last baseline that fit, and since a conversation only grows, every
+    such request is marked ``aligned=False`` (its record is estimated).
     """
 
     def __init__(self) -> None:
         self._lock = threading.Lock()
-        self._previous: OrderedDict[str, tuple[int, list[ItemCounts]]] = OrderedDict()
+        # key -> (settled ticket, items, last ticket that used it), oldest use first.
+        self._previous: OrderedDict[str, tuple[int, list[ItemCounts], int]] = OrderedDict()
+        # ticket -> (key, items), in ticket order.
         self._pending: OrderedDict[int, tuple[str, list[ItemCounts]]] = OrderedDict()
         self._stored = 0
         self._pending_items = 0
@@ -296,6 +309,10 @@ class ItemLedger:
             self._seq += 1
             seq = self._seq
             entry = self._previous.get(key)
+            if entry is not None:
+                self._previous[key] = (entry[0], entry[1], seq)
+                self._previous.move_to_end(key)
+            self._pending[seq] = (key, [])
         previous = entry[1] if entry else None
         known: dict[str, int] = {}
         for item in previous or ():
@@ -314,11 +331,13 @@ class ItemLedger:
 
         items, aligned = _align(counted(original), counted(sent), previous)
         with self._lock:
-            self._pending[seq] = (key, items)
-            self._pending_items += len(items)
-            while self._pending_items > MAX_STORED_ITEMS and len(self._pending) > 1:
-                _, (_, dropped) = self._pending.popitem(last=False)
-                self._pending_items -= len(dropped)
+            if len(items) > MAX_STORED_ITEMS:
+                self._pending.pop(seq, None)
+                aligned = False
+            elif seq in self._pending:  # not already evicted while counting
+                self._pending[seq] = (key, items)
+                self._pending_items += len(items)
+                self._evict()
         return replace(measure_items(items, previous), aligned=aligned, ticket=seq)
 
     def settle(self, measure: ItemMeasure, *, succeeded: bool) -> None:
@@ -335,13 +354,29 @@ class ItemLedger:
             current = self._previous.get(key)
             if current is not None and current[0] > seq:
                 return
+            # Moving items from pending to stored never grows the total.
             self._stored -= len(current[1]) if current else 0
-            self._previous[key] = (seq, items)
+            self._previous[key] = (seq, items, self._seq)
             self._previous.move_to_end(key)
             self._stored += len(items)
-            while self._stored > MAX_STORED_ITEMS and len(self._previous) > 1:
-                _, (_, evicted) = self._previous.popitem(last=False)
+
+    def _evict(self) -> None:
+        """Forget the least recent entries until the combined budget holds.
+
+        Called with the lock held. Terminates: the entry just admitted fits
+        the budget on its own.
+        """
+        while self._stored + self._pending_items > MAX_STORED_ITEMS:
+            oldest_ticket = next(iter(self._pending), None)
+            oldest_key = next(iter(self._previous), None)
+            if oldest_key is not None and (
+                oldest_ticket is None or self._previous[oldest_key][2] < oldest_ticket
+            ):
+                _, (_, evicted, _) = self._previous.popitem(last=False)
                 self._stored -= len(evicted)
+            else:
+                _, (_, dropped) = self._pending.popitem(last=False)
+                self._pending_items -= len(dropped)
 
 
 _ledger = ItemLedger()

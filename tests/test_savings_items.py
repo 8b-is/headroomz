@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import threading
 from typing import Any
 
 import httpx
@@ -130,12 +131,74 @@ def test_requests_awaiting_their_outcome_are_bounded_by_items(monkeypatch):
     # The oldest pending request was forgotten; settling it is a no-op.
     ledger.settle(abandoned, succeeded=True)
     ledger.settle(kept, succeeded=True)
-    again = _items("[]", '"x"', '"y"')
-    assert ledger.measure("a", again, again, _words).sent_shared_prefix == 0
+    # Each probe is itself a pending request under the budget: kept first.
     assert (
         ledger.measure("b", _items("[]", '"z"'), _items("[]", '"z"'), _words).sent_shared_prefix
         == 2
     )
+    again = _items("[]", '"x"', '"y"')
+    assert ledger.measure("a", again, again, _words).sent_shared_prefix == 0
+
+
+def test_a_slow_older_measure_never_evicts_a_newer_one(monkeypatch):
+    """JerrettDavis's #4240 interleaving: ticket 1 stalls inside token
+    counting while ticket 2 measures four items. Eviction must drop the older
+    ticket, not the newer one that finished first."""
+    monkeypatch.setattr(savings, "MAX_STORED_ITEMS", 4)
+    ledger = ItemLedger()
+    counting, release = threading.Event(), threading.Event()
+
+    def stalled(text: str) -> int:
+        counting.set()
+        assert release.wait(timeout=10)
+        return _words(text)
+
+    older: list[ItemMeasure] = []
+    slow = _items("[]", '"x"')
+    thread = threading.Thread(target=lambda: older.append(ledger.measure("a", slow, slow, stalled)))
+    thread.start()
+    assert counting.wait(timeout=10)
+    new = _items("[]", '"b1"', '"b2"', '"b3"')
+    newer = ledger.measure("b", new, new, _words)
+    release.set()
+    thread.join(timeout=10)
+
+    ledger.settle(newer, succeeded=True)
+    ledger.settle(older[0], succeeded=True)
+    assert ledger.measure("b", new, new, _words).sent_shared_prefix == 4
+
+
+def test_settled_and_pending_items_share_one_budget(monkeypatch):
+    monkeypatch.setattr(savings, "MAX_STORED_ITEMS", 4)
+    ledger = ItemLedger()
+    idle = _items("[]", '"a1"', '"a2"', '"a3"')
+    _turn(ledger, idle, idle)
+    active = _items("[]", '"b1"', '"b2"', '"b3"')
+    in_flight = ledger.measure("b", active, active, _words)
+    # Admitting the in-flight request evicted the idle baseline at once.
+    assert ledger._stored + ledger._pending_items == 4
+    ledger.settle(in_flight, succeeded=True)
+    assert ledger.measure("b", active, active, _words).sent_shared_prefix == 4
+    assert ledger.measure("conv", idle, idle, _words).sent_shared_prefix == 0
+
+
+def test_a_request_larger_than_the_budget_is_measured_but_never_kept(monkeypatch):
+    """It cannot become the next baseline, so the conversation keeps the last
+    one that fit (a shorter shared prefix, which errs toward the miss rate) and
+    the records it feeds are marked estimated. Other conversations keep theirs."""
+    monkeypatch.setattr(savings, "MAX_STORED_ITEMS", 4)
+    ledger = ItemLedger()
+    other = _items("[]")
+    ledger.settle(ledger.measure("other", other, other, _words), succeeded=True)
+    base = _items("[]", '"s"', '"u1"')
+    _turn(ledger, base, base)
+    grown = [*base, *_items('"u2"', '"u3"')]
+    m = _turn(ledger, grown, grown)
+    assert (m.sent_shared_prefix, m.aligned) == (3, False)
+    longer = [*grown, *_items('"u4"')]
+    m = _turn(ledger, longer, longer)
+    assert (m.sent_shared_prefix, m.aligned) == (3, False)
+    assert ledger.measure("other", other, other, _words).sent_shared_prefix == 1
 
 
 def test_messages_stand_in_for_input():
