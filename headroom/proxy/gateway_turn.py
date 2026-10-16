@@ -342,7 +342,9 @@ def normalize_usage(usage: dict[str, Any]) -> NormalizedUsage:
     # ``input_tokens`` too, so the key name cannot be the discriminator. Keying
     # off Anthropic's cache fields can misread only a relay that mixes the two
     # vocabularies, and then it errs towards not inflating the prompt.
-    input_includes_cache = not (
+    # Responses' ``input_tokens_details`` marks an inclusive total even when a
+    # relay also flattened a top-level read beside it.
+    input_includes_cache = "input_tokens_details" in usage or not (
         "cache_read_input_tokens" in usage or "cache_creation_input_tokens" in usage
     )
     output_tokens = _usage_int(usage, "output_tokens")
@@ -351,10 +353,16 @@ def normalize_usage(usage: dict[str, Any]) -> NormalizedUsage:
 
     cache_read = _usage_int(usage, "cache_read_input_tokens")
     cache_write = _usage_int(usage, "cache_creation_input_tokens")
+    if cache_write is None:
+        # Responses reports billed writes as input_tokens_details.cache_write_tokens;
+        # chat reports none. Read whether or not a top-level read was relayed.
+        details = usage.get("input_tokens_details")
+        if isinstance(details, dict):
+            cache_write = _usage_int(details, "cache_write_tokens")
     if cache_read is None:
-        # OpenAI reports reads only (no write counter exists), nested under
-        # prompt_tokens_details (chat), input_tokens_details (Responses) or —
-        # in Kong's flattened log shape — at the top level.
+        # OpenAI nests reads under prompt_tokens_details (chat),
+        # input_tokens_details (Responses) or — in Kong's flattened log shape —
+        # puts them at the top level.
         for details_key in ("prompt_tokens_details", "input_tokens_details"):
             details = usage.get(details_key)
             if isinstance(details, dict):
