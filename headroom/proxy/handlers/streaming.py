@@ -32,6 +32,8 @@ from headroom.proxy.token_counting import gemini_output_tokens
 if TYPE_CHECKING:
     from fastapi.responses import Response, StreamingResponse
 
+    from headroom.proxy.savings import ItemMeasure
+
 
 import httpx
 
@@ -815,6 +817,7 @@ class StreamingMixin:
         # See ``conversation_savings``.
         conversation_key: str | None = None,
         conversation_tokens_saved: int | None = None,
+        savings_measure: ItemMeasure | None = None,
     ) -> None:
         from headroom.proxy.outcome import RequestOutcome
 
@@ -1040,6 +1043,7 @@ class StreamingMixin:
             waste_signals=waste_signals,
             conversation_key=conversation_key,
             conversation_tokens_saved=conversation_tokens_saved,
+            savings_measure=savings_measure,
         )
         await self._record_request_outcome(outcome)
 
@@ -1071,6 +1075,7 @@ class StreamingMixin:
         session_key: str | None = None,
         conversation_key: str | None = None,
         conversation_tokens_saved: int | None = None,
+        savings_measure: ItemMeasure | None = None,
         server_memory_tool_names: frozenset[str] | None = None,
         client_beta: str | None = None,
     ) -> Response | StreamingResponse:
@@ -1118,6 +1123,7 @@ class StreamingMixin:
                 session_key=session_key,
                 conversation_key=conversation_key,
                 conversation_tokens_saved=conversation_tokens_saved,
+                savings_measure=savings_measure,
                 server_memory_tool_names=server_memory_tool_names,
                 client_beta=client_beta,
             )
@@ -1152,6 +1158,7 @@ class StreamingMixin:
         session_key: str,
         conversation_key: str | None = None,
         conversation_tokens_saved: int | None = None,
+        savings_measure: ItemMeasure | None = None,
         server_memory_tool_names: frozenset[str] | None = None,
         client_beta: str | None = None,
     ) -> Response | StreamingResponse:
@@ -1586,6 +1593,7 @@ class StreamingMixin:
                 status_code=upstream_response.status_code,
                 conversation_key=conversation_key,
                 conversation_tokens_saved=conversation_tokens_saved,
+                savings_measure=savings_measure,
             )
             self._cleanup_mid_turn_stream(session_key)
             return Response(
@@ -1981,6 +1989,7 @@ class StreamingMixin:
                     ),
                     conversation_key=conversation_key,
                     conversation_tokens_saved=conversation_tokens_saved,
+                    savings_measure=savings_measure,
                 )
                 if supports_mid_turn_coalescing(client) and pending_messages:
                     pending_event = json.dumps(
