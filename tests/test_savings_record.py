@@ -91,17 +91,19 @@ def test_a_bust_never_claims_more_reads_than_the_request_missed():
     assert record.saved_usd == pytest.approx(-(500 * (IN - READ) + 500 * (WRITE - READ)))
 
 
-def test_an_old_item_headroom_grew_never_drives_a_bucket_negative():
-    """1,000 original tokens sent as 10,000 both times, prompt cached."""
+def test_an_old_item_headroom_grew_inherits_no_reads_below_the_cache_minimum():
+    """JerrettDavis's #4236 case: a 1,000-token item sent as 10,000 tokens on
+    successive requests, prompt cached. The 1,000-token counterfactual is
+    under the 1,024-token minimum, so none of it could have been a read."""
     measure = ItemMeasure(
         sent_tokens=10_000, removed_old=-9_000, removed_new=0, sent_shared_prefix=10_000, bust=0
     )
     usage = CacheMix(read=9_000, uncached=1_000)
     for provider in ("openai", "anthropic"):
         record = compute_savings_record(measure, usage, model="gpt", provider=provider)
-        assert record.counterfactual_input_cost_usd >= 0
-        # The 1,000-token original would have been the only input.
-        assert record.counterfactual_input_cost_usd <= 1_000 * IN
+        assert record.actual_input_cost_usd == pytest.approx(0.0057)
+        assert record.counterfactual_input_cost_usd == pytest.approx(1_000 * IN)  # $0.003
+        assert record.saved_usd == pytest.approx(-0.0027)
 
 
 def test_summed_iteration_usage_does_not_calibrate_k():
@@ -153,10 +155,11 @@ def test_openai_reads_come_in_128_token_blocks():
 
 
 def test_a_counterfactual_prefix_below_the_models_cache_minimum_is_never_warm():
+    # A 3,000-token old prefix: cacheable on Sonnet (1,024), not on Haiku (4,096).
     measure = ItemMeasure(
-        sent_tokens=3_000, removed_old=500, removed_new=0, sent_shared_prefix=1_500, bust=0
+        sent_tokens=10_000, removed_old=1_000, removed_new=0, sent_shared_prefix=2_000, bust=0
     )
-    usage = CacheMix(uncached=1_500, read=1_500)
+    usage = CacheMix(uncached=5_000, read=5_000)
     assert compute_savings_record(measure, usage, model="sonnet").warm > 0
     assert compute_savings_record(measure, usage, model="haiku").warm == 0.0
 
@@ -224,3 +227,111 @@ def test_billed_buckets_price_at_billing_rates(monkeypatch):
     record = compute_savings_record(MEASURE, WARM, model="sonnet", provider="anthropic")
     assert record.actual_input_cost_usd == pytest.approx(2_000 * IN + 90_000 * 5e-7 + 8_000 * WRITE)
     assert record.saved_usd == pytest.approx(0.058618, abs=1e-6)
+
+
+def _fully_cached_original_of(original: int, *, model: str, provider: str):
+    """A 10,000-token sent body read wholly from cache, whose original was
+    ``original`` tokens: the counterfactual is that original alone."""
+    measure = ItemMeasure(
+        sent_tokens=10_000,
+        removed_old=original - 10_000,
+        removed_new=0,
+        sent_shared_prefix=10_000,
+        bust=0,
+    )
+    return compute_savings_record(measure, CacheMix(read=10_000), model=model, provider=provider)
+
+
+@pytest.mark.parametrize(
+    ("original", "reads"),
+    [(1_023, 0), (1_024, 1_024), (1_151, 1_024), (1_152, 1_152), (2_000, 1_920)],
+)
+def test_an_openai_counterfactual_reads_whole_blocks_above_its_own_minimum(original, reads):
+    record = _fully_cached_original_of(original, model="gpt", provider="openai")
+    expected = reads * READ + (original - reads) * IN
+    assert record.counterfactual_input_cost_usd == pytest.approx(expected)
+
+
+@pytest.mark.parametrize(("original", "reads"), [(4_095, 0), (4_096, 4_096), (4_097, 4_097)])
+def test_an_anthropic_counterfactual_obeys_its_models_cache_minimum(original, reads):
+    record = _fully_cached_original_of(original, model="haiku", provider="anthropic")
+    expected = reads * READ + (original - reads) * IN
+    assert record.counterfactual_input_cost_usd == pytest.approx(expected)
+
+
+def test_a_counterfactual_too_small_to_cache_pays_no_write_premium():
+    """Below its minimum the counterfactual can be neither read nor written."""
+    measure = ItemMeasure(
+        sent_tokens=10_000, removed_old=-9_000, removed_new=0, sent_shared_prefix=10_000, bust=0
+    )
+    usage = CacheMix(read=9_000, write_5m=1_000)
+    record = compute_savings_record(measure, usage, model="sonnet", provider="anthropic")
+    assert record.counterfactual_input_cost_usd == pytest.approx(1_000 * IN)
+
+
+def test_a_grown_old_item_takes_its_reads_out_even_with_new_items():
+    """The new items keep the counterfactual above the minimum overall; its
+    1,000-token old prefix is still too small to have been read."""
+    measure = ItemMeasure(
+        sent_tokens=30_000,
+        removed_old=-9_000,
+        removed_new=20_000,
+        sent_shared_prefix=10_000,
+        bust=0,
+    )
+    usage = CacheMix(read=9_000, uncached=21_000)
+    record = compute_savings_record(measure, usage, model="gpt", provider="openai")
+    assert record.counterfactual_input_cost_usd == pytest.approx(41_000 * IN)
+
+
+def test_a_catalog_minimum_the_provider_disproved_is_not_applied():
+    """Haiku's catalog says 4,096, but the provider read 3,000: keeping the
+    counterfactual's 1,500 reads is the conservative price."""
+    measure = ItemMeasure(
+        sent_tokens=10_000, removed_old=-5_000, removed_new=0, sent_shared_prefix=10_000, bust=0
+    )
+    usage = CacheMix(read=3_000, uncached=7_000)
+    record = compute_savings_record(measure, usage, model="haiku", provider="anthropic")
+    assert record.counterfactual_input_cost_usd == pytest.approx(1_500 * READ + 3_500 * IN)
+
+
+def test_nothing_removed_saves_nothing_whatever_the_read_alignment():
+    measure = ItemMeasure(
+        sent_tokens=10_000, removed_old=0, removed_new=0, sent_shared_prefix=2_000, bust=0
+    )
+    for provider, usage in (
+        ("openai", CacheMix(read=9_000, uncached=1_000)),
+        ("anthropic", CacheMix(read=900, write_5m=9_100)),
+    ):
+        record = compute_savings_record(measure, usage, model="haiku", provider=provider)
+        assert record.saved_usd == pytest.approx(0.0, abs=1e-12)
+
+
+def test_a_shrunk_bucket_is_never_priced_below_zero(monkeypatch):
+    """Reads a grown item gave up price at the billing rate they were billed
+    at, not at the estimate rate, so the counterfactual cannot go negative."""
+    billing = dataclasses.replace(BASE, read=1.5e-6)
+
+    def rates(model, *, long_context=False, provider=None, for_billing=False):
+        return billing if for_billing else BASE
+
+    monkeypatch.setattr(counterfactual, "resolve_rates", rates)
+    measure = ItemMeasure(
+        sent_tokens=10_000, removed_old=-9_000, removed_new=0, sent_shared_prefix=10_000, bust=0
+    )
+    record = compute_savings_record(
+        measure, CacheMix(read=9_000, uncached=1_000), model="gpt", provider="openai"
+    )
+    assert record.counterfactual_input_cost_usd == pytest.approx(1_000 * IN)
+
+
+def test_a_disproved_minimum_still_writes_nothing_smaller_than_was_cached():
+    """Haiku's catalog minimum is disproved by a 2,000-token read; a 500-token
+    counterfactual is below anything shown cacheable, so it writes nothing."""
+    measure = ItemMeasure(
+        sent_tokens=3_000, removed_old=-2_500, removed_new=0, sent_shared_prefix=3_000, bust=0
+    )
+    usage = CacheMix(read=2_000, write_5m=1_000)
+    record = compute_savings_record(measure, usage, model="haiku", provider="anthropic")
+    reads = 2_000 + -2_500 * (2 / 3)
+    assert record.counterfactual_input_cost_usd == pytest.approx(reads * READ + (500 - reads) * IN)

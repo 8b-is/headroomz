@@ -265,58 +265,74 @@ def _compute(
     misses = mix.uncached + writes
     w = writes / misses if misses > 0 else 0.0
 
-    # The counterfactual prefix must itself have been cacheable.
-    if k * (measure.sent_shared_prefix + measure.removed_old) < _min_cacheable_tokens(
-        model, provider
-    ):
+    # The counterfactual must obey its own cache minimum. The catalog's
+    # minimum is used unless this request was demonstrably cached or written
+    # below it; then the catalog is wrong and no minimum is applied, the
+    # direction that cannot inflate the saving.
+    min_cacheable = _min_cacheable_tokens(model, provider)
+    proven = mix.read if mix.read > 0 else (billed if writes > 0 else min_cacheable)
+    threshold = min_cacheable if proven >= min_cacheable else 0
+    # Removed or busted old tokens could only have been reads if the
+    # counterfactual's old prefix was itself cacheable.
+    raw_warm = warm
+    if k * (measure.sent_shared_prefix + measure.removed_old) < threshold:
         warm = 0.0
 
-    # Tokens that would have been read instead of missed. Capped at everything
-    # the counterfactual missed at all: a bust cannot turn more tokens into
-    # reads than the request actually missed plus what Headroom removed, and
-    # without the cap the counterfactual buckets go negative.
-    # It can be negative when an old item grew; it never removes more reads
-    # than the request had.
-    extra_read = max(
-        -float(mix.read),
-        min(k * (measure.removed_old + measure.bust) * warm, misses + k * removed),
-    )
-    if provider == "openai" and extra_read > 0:
-        # Hits come in whole 128-token blocks; the remainder stays a miss.
-        total_read = mix.read + extra_read
-        blocks = (total_read // OPENAI_CACHE_BLOCK_TOKENS) * OPENAI_CACHE_BLOCK_TOKENS
-        extra_read = max(blocks, mix.read) - mix.read
-    extra_miss = k * removed - extra_read
-    extra_write = extra_miss * w
+    # The counterfactual's buckets are built whole, not as deltas clamped onto
+    # the actual ones: a counterfactual smaller than the request (an old item
+    # Headroom grew) must not inherit reads or writes it was too small to make.
+    # Its reads are the actual reads plus the removed/busted old tokens that
+    # would have hit, minus the reads a grown old item contributed (those go
+    # whatever the prefix size), never more than its whole billed input, and
+    # none below its cache minimum. ``cf_billed`` is ``k * original`` when k is
+    # calibrated; the clamp matters only for summed (estimated) usage.
+    cf_billed = max(0.0, billed + k * removed)
+    gained = k * (max(0, measure.removed_old) + measure.bust) * warm
+    lost = k * min(0, measure.removed_old) * raw_warm
+    cf_read = min(max(0.0, mix.read + gained + lost), cf_billed)
+    if cf_read < threshold:
+        # Never fires when nothing changed: the actual reads are 0 or proven
+        # at least the threshold.
+        cf_read = 0.0
+    if provider == "openai" and cf_read != mix.read:
+        # Hits come in whole 128-token blocks: round down, but a counterfactual
+        # that adds reads keeps at least the actual ones. The ``!=`` keeps an
+        # unchanged request exactly at the actual reads.
+        blocks = (cf_read // OPENAI_CACHE_BLOCK_TOKENS) * OPENAI_CACHE_BLOCK_TOKENS
+        cf_read = max(blocks, mix.read) if cf_read > mix.read else blocks
+    # Everything else missed, written in the proportion the request wrote,
+    # unless the counterfactual is smaller than anything shown cacheable: a
+    # write it could not make would inflate the saving.
+    cf_miss = cf_billed - cf_read
+    cf_write = cf_miss * w if cf_billed >= min(min_cacheable, proven) else 0.0
     w5_share = mix.write_5m / writes if writes > 0 else 1.0
+    cf_buckets = {
+        "uncached": cf_miss - cf_write,
+        "read": cf_read,
+        "write_5m": cf_write * w5_share,
+        "write_1h": cf_write * (1.0 - w5_share),
+    }
+    actual_buckets = {
+        "uncached": float(mix.uncached),
+        "read": float(mix.read),
+        "write_5m": float(mix.write_5m),
+        "write_1h": float(mix.write_1h),
+    }
 
-    # The billed buckets price at billing rates on both sides (the
-    # counterfactual's at its own context tier); only the tokens Headroom
-    # changed price at the savings-estimate rates.
-    cf_billed = billed + k * removed
+    # Tokens the request was billed for price at billing rates on both sides
+    # (the counterfactual's at its own context tier); only the tokens a
+    # counterfactual bucket holds beyond the actual one price at the
+    # savings-estimate rates. Every priced quantity is nonnegative.
     actual_rates = rates_for(billed, for_billing=True)
     cf_billing_rates = rates_for(cf_billed, for_billing=True)
     cf_rates = rates_for(cf_billed)
     if actual_rates is None or cf_billing_rates is None or cf_rates is None:
         return _unpriced(measure, k=k, estimated=estimated)
 
-    def billed_cost(rates: CacheRates) -> float:
-        return _input_cost(
-            rates,
-            uncached=mix.uncached,
-            read=mix.read,
-            write_5m=mix.write_5m,
-            write_1h=mix.write_1h,
-        )
-
-    actual = billed_cost(actual_rates)
-    counterfactual = billed_cost(cf_billing_rates) + _input_cost(
-        cf_rates,
-        uncached=extra_miss - extra_write,
-        read=extra_read,
-        write_5m=extra_write * w5_share,
-        write_1h=extra_write * (1.0 - w5_share),
-    )
+    actual = _input_cost(actual_rates, **actual_buckets)
+    counterfactual = _input_cost(
+        cf_billing_rates, **{b: min(n, actual_buckets[b]) for b, n in cf_buckets.items()}
+    ) + _input_cost(cf_rates, **{b: max(0.0, n - actual_buckets[b]) for b, n in cf_buckets.items()})
     return SavingsRecord(
         saved_usd=counterfactual - actual,
         actual_input_cost_usd=actual,
