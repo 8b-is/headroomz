@@ -11,6 +11,7 @@ import asyncio
 import contextlib
 import json
 import logging
+import math
 import sys
 from pathlib import Path
 from types import SimpleNamespace
@@ -2426,21 +2427,28 @@ class _UpstreamAfterSends(_FakeUpstream):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    ("sources_per_frame", "expected_rows"),
-    [(lambda i: "tool_search", 2), (lambda i: f"src{i}", 34)],
-    ids=["repeated_source", "distinct_sources"],
+    ("sources_per_frame", "frames_n", "expected_rows", "overflowed"),
+    [
+        (lambda i: "tool_search", 33, 2, False),
+        (lambda i: f"src{i}", 33, 34, False),
+        # ws_fold + 255 named sources fill MAX_NAMED_ROWS; the other 45 share one row.
+        (lambda i: f"src{i}", 300, 257, True),
+    ],
+    ids=["repeated_source", "distinct_sources", "distinct_sources_past_the_bound"],
 )
-async def test_ws_pending_savings_beyond_32_rows_are_all_booked(sources_per_frame, expected_rows):
-    """33 pending frames hand every token and every event to the billed turn.
+async def test_ws_pending_savings_beyond_32_rows_are_all_booked(
+    sources_per_frame, frames_n, expected_rows, overflowed
+):
+    """Pending frames hand every token and every event to the billed turn.
 
-    Rows coalesce to one per (source, realized, estimated) key, with no cap and
-    no ``other`` bucket.
+    Rows coalesce to one per (source, realized, estimated) key; distinct
+    sources past ``MAX_NAMED_ROWS`` fold into ``other`` rather than growing
+    the session's pending list without bound.
     """
     from headroom.proxy.prometheus_metrics import PrometheusMetrics
     from headroom.proxy.savings_attribution import SAVINGS_ATTRIBUTION_TAG, from_tags
     from headroom.proxy.turn_hooks import clear_turn_hooks, register_turn_hook
 
-    frames_n = 33
     seen = {"frame": 0}
 
     class _DeferTools:
@@ -2450,7 +2458,7 @@ async def test_ws_pending_savings_beyond_32_rows_are_all_booked(sources_per_fram
 
         def on_request(self, ctx: SimpleNamespace) -> None:
             del ctx.messages[:-1]
-            ctx.record_savings(sources_per_frame(seen["frame"]), tokens=100)
+            ctx.record_savings(sources_per_frame(seen["frame"]), tokens=100, usd=0.01)
             seen["frame"] += 1
 
     def _frame(i: int) -> str:
@@ -2519,5 +2527,6 @@ async def test_ws_pending_savings_beyond_32_rows_are_all_booked(sources_per_fram
     hook_rows = [row for row in metrics.savings_by_source.values() if row["source"] != "ws_fold"]
     assert sum(int(row["tokens"]) for row in hook_rows) == 100 * frames_n
     assert sum(int(row["events"]) for row in hook_rows) == frames_n
-    assert "other" not in {row["source"] for row in hook_rows}
+    assert math.isclose(sum(float(row["usd"]) for row in hook_rows), 0.01 * frames_n)
+    assert ("other" in {row["source"] for row in hook_rows}) is overflowed
     assert stored == [expected_rows]
