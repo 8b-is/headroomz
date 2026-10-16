@@ -6,12 +6,12 @@ import base64
 import json
 import math
 import re
-from collections.abc import MutableMapping
+import warnings
+from collections.abc import Iterable, MutableMapping
 from typing import Any
 
 SAVINGS_ATTRIBUTION_TAG = "_headroom_savings_attribution"
 _NAME_RE = re.compile(r"[^a-z0-9_.-]+")
-MAX_SOURCES = 32
 _SCOPE_KEY = "headroom_savings_attribution"
 
 # Per-request stage timings contributed from outside the handler, merged into
@@ -164,9 +164,6 @@ def record_savings(
     details: dict[str, Any] | None = None,
 ) -> None:
     """Attribute savings to a source; this never changes headline totals."""
-    ledger = _ledger(tags)
-    if len(ledger) >= MAX_SOURCES:
-        return
     # Same hazard as MAX_STAGE_MS, on the amounts rather than the durations:
     # ``usd=inf`` reaches ``/stats`` and raises out of the JSON encoder, and
     # ``int(inf)`` raises OverflowError right here, inside the handler, on a
@@ -193,46 +190,53 @@ def record_savings(
             for key, value in list(details.items())[:12]
             if isinstance(value, (str, int, float, bool)) or value is None
         }
-    ledger.append(item)
+    accumulate(_ledger(tags), [item])
 
 
 def from_tags(tags: MutableMapping[str, Any] | None) -> list[dict[str, Any]]:
     raw = (tags or {}).get(SAVINGS_ATTRIBUTION_TAG)
     if not isinstance(raw, list):
         return []
-    return [dict(item) for item in raw[:MAX_SOURCES] if isinstance(item, dict)]
+    return [dict(item) for item in raw if isinstance(item, dict)]
 
 
-# One "other" row per (realized, estimated) pair is kept free, so overflow is
-# summed rather than dropped.
-_OVERFLOW_SLOTS = 4
+def event_count(row: dict[str, Any]) -> int:
+    """How many recordings a row stands for; a row without ``events`` is one."""
+    try:
+        return max(1, int(row.get("events", 1)))
+    except (TypeError, ValueError, OverflowError):
+        return 1
 
 
-def accumulate(pending: list[dict[str, Any]], items: list[dict[str, Any]]) -> None:
-    """Add ``items`` to ``pending`` in at most ``MAX_SOURCES`` rows, conserving totals.
+def accumulate(rows: list[dict[str, Any]], items: Iterable[dict[str, Any]]) -> None:
+    """Add ``items`` to ``rows``, one row per (source, realized, estimated).
 
-    For a ledger that outlives one request: a WS session holds rows until a
-    usage-carrying turn claims them, and :func:`from_tags` reads only the first
-    ``MAX_SOURCES``. Rows with the same (source, realized, estimated) sum into
-    one; a new source past the cap sums into that pair's ``other`` row.
-    ``details`` stay only while every summed row agrees on them.
+    Every writer goes through here -- the per-request ledger and a WS session's
+    pending rows alike -- so the row count is bounded by the distinct sources
+    that booked, and no row is ever dropped. Same-key rows sum ``tokens``,
+    ``usd`` and ``events``; ``details`` stay only while every summed row agrees.
     """
     for item in items:
         key = _key(item)
-        target = _row_for(pending, key)
-        if target is None and len(pending) >= MAX_SOURCES - _OVERFLOW_SLOTS:
-            key = ("other", key[1], key[2])
-            target = _row_for(pending, key)
-            item = {k: v for k, v in item.items() if k != "details"}
+        target = _row_for(rows, key)
         if target is None:
-            pending.append({**item, "source": key[0]})
+            rows.append({**item, "source": key[0], "events": event_count(item)})
             continue
-        target["tokens"] = int(target.get("tokens", 0)) + int(item.get("tokens", 0) or 0)
-        target["usd"] = round(
-            float(target.get("usd", 0.0)) + float(item.get("usd", 0.0) or 0.0), 12
-        )
+        target["tokens"] = _num(target.get("tokens"), int) + _num(item.get("tokens"), int)
+        target["usd"] = round(_num(target.get("usd"), float) + _num(item.get("usd"), float), 12)
+        target["events"] = event_count(target) + event_count(item)
         if target.get("details") != item.get("details"):
             target.pop("details", None)
+
+
+def _num(value: Any, cast: type[int] | type[float]) -> Any:
+    # A row edited in place by a reader (deferral reconcile, plugins) may hold
+    # junk; summing it must not raise inside the handler.
+    try:
+        number = cast(value or 0)
+    except (TypeError, ValueError, OverflowError):
+        return cast(0)
+    return number if math.isfinite(number) else cast(0)
 
 
 def _key(row: dict[str, Any]) -> tuple[str, bool, bool]:
@@ -241,7 +245,9 @@ def _key(row: dict[str, Any]) -> tuple[str, bool, bool]:
 
 
 def _row_for(rows: list[dict[str, Any]], key: tuple[str, bool, bool]) -> dict[str, Any] | None:
-    return next((row for row in rows if _key(row) == key), None)
+    # The ledger is a plain list reachable through ``tags``; skip what this
+    # module did not write rather than raise inside the handler.
+    return next((row for row in rows if isinstance(row, dict) and _key(row) == key), None)
 
 
 _INTERNAL_TAGS = frozenset({SAVINGS_ATTRIBUTION_TAG, STAGE_TIMING_TAG})
@@ -287,3 +293,17 @@ def decode(value: str) -> list[dict[str, Any]]:
         if isinstance(decoded, list)
         else []
     )
+
+
+def __getattr__(name: str) -> Any:
+    # MAX_SOURCES used to cap a request's ledger at 32 rows and silently drop
+    # the rest; rows now coalesce per source instead. Kept for importers.
+    if name == "MAX_SOURCES":
+        warnings.warn(
+            "headroom.proxy.savings_attribution.MAX_SOURCES no longer caps anything "
+            "and will be removed; savings rows coalesce per source instead.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        return 32
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

@@ -396,3 +396,69 @@ async def test_extension_savings_reach_the_metrics_call() -> None:
 
     attribution = h.metrics.record_request.await_args.kwargs["savings_attribution"]
     assert [(row["source"], row["usd"]) for row in attribution] == [("routemegood", 0.42)]
+
+
+# --- no row cap: every recording is booked -------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_a_request_with_40_sources_books_every_token() -> None:
+    """The ledger used to stop at 32 rows and drop the 33rd recording on."""
+    from headroom.proxy.prometheus_metrics import PrometheusMetrics
+    from headroom.proxy.savings_attribution import record_savings
+
+    tags: dict = {}
+    for i in range(40):
+        record_savings(tags, f"plugin{i}", tokens=100, usd=0.01)
+    record_savings(tags, "plugin0", tokens=100, usd=0.01)
+
+    rows = from_tags(tags)
+    metrics = PrometheusMetrics()
+    await metrics.record_request(
+        provider="openai",
+        model="gpt-5.4",
+        input_tokens=10,
+        output_tokens=1,
+        tokens_saved=0,
+        latency_ms=1.0,
+        savings_attribution=rows,
+    )
+
+    assert len(rows) == 40
+    booked = metrics.savings_by_source.values()
+    assert sum(int(row["tokens"]) for row in booked) == 4_100
+    assert sum(int(row["events"]) for row in booked) == 41
+    assert metrics.savings_by_source["plugin0:1"]["events"] == 2
+
+
+def test_rows_coalesce_per_source_realized_and_estimated() -> None:
+    from headroom.proxy.savings_attribution import record_savings
+
+    tags: dict = {}
+    for _ in range(3):
+        record_savings(tags, "router", tokens=1, realized=True)
+        record_savings(tags, "router", tokens=1, realized=False)
+        record_savings(tags, "router", tokens=1, estimated=True)
+
+    rows = from_tags(tags)
+    assert [(r["realized"], r["estimated"], r["tokens"], r["events"]) for r in rows] == [
+        (True, False, 3, 3),
+        (False, False, 3, 3),
+        (True, True, 3, 3),
+    ]
+
+
+def test_merging_into_a_junk_row_does_not_raise_inside_the_handler() -> None:
+    from headroom.proxy.savings_attribution import record_savings
+
+    tags: dict = {SAVINGS_ATTRIBUTION_TAG: [{"source": "x", "tokens": None, "usd": "junk"}]}
+    record_savings(tags, "x", tokens=5, usd=0.5)
+
+    assert [(r["tokens"], r["usd"], r["events"]) for r in from_tags(tags)] == [(5, 0.5, 2)]
+
+
+def test_max_sources_is_deprecated_not_removed() -> None:
+    from headroom.proxy import savings_attribution
+
+    with pytest.warns(DeprecationWarning, match="MAX_SOURCES"):
+        assert savings_attribution.MAX_SOURCES == 32

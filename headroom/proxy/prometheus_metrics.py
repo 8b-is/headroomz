@@ -22,6 +22,7 @@ if TYPE_CHECKING:
 
 from headroom import savings_ledger
 from headroom.observability import get_otel_metrics
+from headroom.proxy.savings_attribution import event_count
 from headroom.proxy.savings_tracker import SavingsTracker, estimate_request_savings_usd
 
 logger = logging.getLogger("headroom.proxy")
@@ -988,7 +989,7 @@ class PrometheusMetrics:
                         "usd": 0.0,
                     },
                 )
-                row["events"] = int(row["events"]) + 1
+                row["events"] = int(row["events"]) + event_count(item)
                 row["tokens"] = int(row["tokens"]) + max(0, int(item.get("tokens", 0) or 0))
                 row["usd"] = round(
                     float(row["usd"]) + float(item.get("usd", 0.0) or 0.0),

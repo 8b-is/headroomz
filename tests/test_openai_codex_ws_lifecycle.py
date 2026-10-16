@@ -2427,29 +2427,20 @@ class _UpstreamAfterSends(_FakeUpstream):
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("sources_per_frame", "expected_rows"),
-    [(lambda i: "tool_search", 2), (lambda i: f"src{i}", 29)],
+    [(lambda i: "tool_search", 2), (lambda i: f"src{i}", 34)],
     ids=["repeated_source", "distinct_sources"],
 )
-async def test_ws_pending_savings_beyond_max_sources_are_all_booked(
-    sources_per_frame, expected_rows
-):
-    """33 frames each booking 100 tokens must hand 3,300 tokens to the outcome.
+async def test_ws_pending_savings_beyond_32_rows_are_all_booked(sources_per_frame, expected_rows):
+    """33 pending frames hand every token and every event to the billed turn.
 
-    The session-wide pending list grew by each frame's rows (here a ``ws_fold``
-    row and a 100-token hook row) and the outcome funnel reads at most
-    ``MAX_SOURCES`` rows, so 66 rows were cut to 32 and the rest cleared
-    unbooked (1,600 of 3,300). Pending rows now coalesce per (source, realized,
-    estimated) and distinct sources past the cap fold into ``other``.
+    Rows coalesce to one per (source, realized, estimated) key, with no cap and
+    no ``other`` bucket.
     """
     from headroom.proxy.prometheus_metrics import PrometheusMetrics
-    from headroom.proxy.savings_attribution import (
-        MAX_SOURCES,
-        SAVINGS_ATTRIBUTION_TAG,
-        from_tags,
-    )
+    from headroom.proxy.savings_attribution import SAVINGS_ATTRIBUTION_TAG, from_tags
     from headroom.proxy.turn_hooks import clear_turn_hooks, register_turn_hook
 
-    frames_n = MAX_SOURCES + 1
+    frames_n = 33
     seen = {"frame": 0}
 
     class _DeferTools:
@@ -2525,10 +2516,8 @@ async def test_ws_pending_savings_beyond_max_sources_are_all_booked(
             latency_ms=1.0,
             savings_attribution=rows,
         )
-    booked = sum(
-        int(row["tokens"])
-        for row in metrics.savings_by_source.values()
-        if row["source"] != "ws_fold"
-    )
-    assert booked == 100 * frames_n
+    hook_rows = [row for row in metrics.savings_by_source.values() if row["source"] != "ws_fold"]
+    assert sum(int(row["tokens"]) for row in hook_rows) == 100 * frames_n
+    assert sum(int(row["events"]) for row in hook_rows) == frames_n
+    assert "other" not in {row["source"] for row in hook_rows}
     assert stored == [expected_rows]

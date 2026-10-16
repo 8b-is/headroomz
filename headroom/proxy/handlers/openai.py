@@ -7029,7 +7029,7 @@ class OpenAIHandlerMixin:
         # that were rewritten and sent, waiting for the next turn's outcome. Each
         # frame compresses into its own dict: a timed-out compression thread
         # keeps running and must not book rows for a frame sent uncompressed.
-        # Bounded by ``accumulate_savings`` so ``from_tags`` reads every row.
+        # Coalesced per source by ``accumulate_savings``, so it stays small.
         ws_turn_savings: list[dict[str, Any]] = []
 
         # Extract subprotocol from client — this is an application-level negotiation
