@@ -91,9 +91,19 @@ class ItemMeasure:
     bust: int
     #: False when the old/new split is approximate (the totals stay exact):
     #: Headroom changed the item count and the original/sent pairing had to be
-    #: approximated, or the baseline may have been truncated to
-    #: :data:`MAX_STORED_ITEMS` items, so later old items count as new.
+    #: approximated, or the baseline was lost (``baseline_lost``).
     aligned: bool = True
+    #: True when the ledger lost what this conversation last sent (its
+    #: baseline or an in-flight request was evicted under the budget, or its
+    #: baseline may be truncated), so ``removed_new`` may hold old items. Such
+    #: a measure is also ``aligned=False``. Its record prices the new removal
+    #: at the cache-read rate, the lowest any input token costs, so the lost
+    #: knowledge can only understate the saving. A conversation's first
+    #: request is not lost: nothing was sent before, so everything is new.
+    baseline_lost: bool = False
+    #: Tokens Headroom added to new items (the negative part of
+    #: ``removed_new``), so the read-rate floor covers only what it removed.
+    grown_new: int = 0
     #: Which measured request this is, for :meth:`ItemLedger.settle`.
     ticket: int = field(default=0, compare=False)
 
@@ -155,6 +165,7 @@ def measure_items(
         removed_new=sum(removed[n_old:]),
         sent_shared_prefix=sum(sent[:n_sent_shared]),
         bust=sum(sent[n_sent_shared:n_old]),
+        grown_new=-sum(r for r in removed[n_old:] if r < 0),
     )
 
 
@@ -204,8 +215,15 @@ def _digest(text: str) -> str:
 
 #: Items kept across all conversations' baselines and requests awaiting their
 #: outcome, combined. A long Codex session carries 1000+ items; bounding items,
-#: not conversations, bounds memory.
+#: not conversations, bounds memory: up to twice this while one conversation's
+#: baseline and its in-flight request exceed it (see :class:`ItemLedger`).
 MAX_STORED_ITEMS = 100_000
+
+#: Conversations remembered as having lost their baseline, a memory bound
+#: (one short key each). Past it the ledger can no longer tell a first request
+#: from a lost one and treats every request without a baseline as lost: priced
+#: at the cache-read floor, which can understate a saving but never overstate it.
+MAX_LOST_KEYS = 100_000
 
 
 def _align(
@@ -279,16 +297,25 @@ class ItemLedger:
     :data:`MAX_STORED_ITEMS`. Past it, whichever is least recent goes first,
     by ticket: a pending request by its own ticket (its slot is reserved when
     the ticket is issued, so a slow measure keeps its place), a baseline by
-    the last ticket that used it. A forgotten pending request leaves its
-    conversation on its previous baseline; a forgotten baseline leaves the
-    conversation's next request with none. Settling counts as a use. A
-    request with more items than the whole budget is measured exactly but
-    kept only up to its first :data:`MAX_STORED_ITEMS` items: the comparison
-    is a prefix, so the next request still gets the shared-prefix credit for
-    all of them and only the items past the cap are priced as new. A request
-    measured against a baseline of exactly that size is marked
-    ``aligned=False`` (its record is estimated), since the baseline may be
-    truncated.
+    the last ticket that used it. Settling counts as a use. A request being
+    admitted never evicts its own conversation's baseline: that baseline is
+    replaced only when a newer request for the conversation succeeds. When
+    only that baseline and one pending request are left, both are kept, even
+    past the budget, so a conversation larger than half the budget still
+    advances; memory then peaks at twice :data:`MAX_STORED_ITEMS` items.
+
+    A request is kept only up to its first :data:`MAX_STORED_ITEMS` items: the
+    comparison is a prefix, so the next request still gets the shared-prefix
+    credit for them.
+
+    Whatever is evicted, its conversation is remembered as lost, so its next
+    request is marked ``baseline_lost`` (and ``aligned=False``): its record
+    prices the new removal at the cache-read floor instead of as new, at the
+    miss rate. So is a request measured against a baseline of exactly
+    :data:`MAX_STORED_ITEMS` items, which may be truncated. A conversation's
+    first request is new, not lost. The memory of losses is bounded by
+    :data:`MAX_LOST_KEYS`; past it, every request without a baseline is
+    treated as lost, and a forgotten loss's stale baseline is dropped with it.
     """
 
     def __init__(self) -> None:
@@ -297,6 +324,10 @@ class ItemLedger:
         self._previous: OrderedDict[str, tuple[int, list[ItemCounts], int]] = OrderedDict()
         # ticket -> (key, items), in ticket order.
         self._pending: OrderedDict[int, tuple[str, list[ItemCounts]]] = OrderedDict()
+        # key -> newest ticket whose items were evicted, oldest loss first.
+        self._lost: OrderedDict[str, int] = OrderedDict()
+        # True once a loss was forgotten: a missing baseline may then be a lost one.
+        self._lost_overflowed = False
         self._stored = 0
         self._pending_items = 0
         self._seq = 0
@@ -316,6 +347,7 @@ class ItemLedger:
             if entry is not None:
                 self._previous[key] = (entry[0], entry[1], seq)
                 self._previous.move_to_end(key)
+            lost = key in self._lost or (entry is None and self._lost_overflowed)
             self._pending[seq] = (key, [])
         previous = entry[1] if entry else None
         known: dict[str, int] = {}
@@ -341,15 +373,20 @@ class ItemLedger:
                 self._pending.pop(seq, None)
             raise
         if previous is not None and len(previous) == MAX_STORED_ITEMS:
-            # Possibly a truncated baseline: items past it count as new.
-            aligned = False
+            # Possibly a truncated baseline: items past it may be old.
+            lost = True
         with self._lock:
             if seq in self._pending:  # not already evicted while counting
                 kept = items[:MAX_STORED_ITEMS]
                 self._pending[seq] = (key, kept)
                 self._pending_items += len(kept)
-                self._evict()
-        return replace(measure_items(items, previous), aligned=aligned, ticket=seq)
+                self._evict(key)
+        return replace(
+            measure_items(items, previous),
+            aligned=aligned and not lost,
+            baseline_lost=lost,
+            ticket=seq,
+        )
 
     def settle(self, measure: ItemMeasure, *, succeeded: bool) -> None:
         """Make a measured request its conversation's baseline if it succeeded."""
@@ -370,25 +407,53 @@ class ItemLedger:
             self._previous[key] = (seq, items, self._seq)
             self._previous.move_to_end(key)
             self._stored += len(items)
+            if self._lost.get(key, seq) < seq:
+                # Newer than everything evicted: the baseline is whole again.
+                del self._lost[key]
 
-    def _evict(self) -> None:
+    def _evict(self, admitting: str) -> None:
         """Forget the least recent entries until the combined budget holds.
 
-        Called with the lock held. Each pass removes one entry, so the loop
-        ends; the entry just admitted may be the one removed.
+        Called with the lock held, right after admitting a request for
+        ``admitting``, whose baseline is never a candidate. Each pass removes
+        one entry until only that baseline and one pending request are left:
+        each holds at most :data:`MAX_STORED_ITEMS` items, so they stay.
         """
         while self._stored + self._pending_items > MAX_STORED_ITEMS:
             oldest_ticket = next(iter(self._pending), None)
-            oldest_key = next(iter(self._previous), None)
+            oldest_key = next((k for k in self._previous if k != admitting), None)
+            if oldest_key is None and len(self._pending) <= 1:
+                return
             # On a tie the baseline goes: the request that used it is newer.
             if oldest_key is not None and (
                 oldest_ticket is None or self._previous[oldest_key][2] <= oldest_ticket
             ):
-                _, (_, evicted, _) = self._previous.popitem(last=False)
+                settled, evicted, _ = self._previous.pop(oldest_key)
                 self._stored -= len(evicted)
+                self._mark_lost(oldest_key, settled)
             else:
-                _, (_, dropped) = self._pending.popitem(last=False)
+                ticket, (key, dropped) = self._pending.popitem(last=False)
                 self._pending_items -= len(dropped)
+                self._mark_lost(key, ticket)
+
+    def _mark_lost(self, key: str, ticket: int) -> None:
+        """Remember that ``key``'s items up to ``ticket`` were evicted (lock held)."""
+        self._lost[key] = max(ticket, self._lost.get(key, 0))
+        self._lost.move_to_end(key)
+        while len(self._lost) > MAX_LOST_KEYS:
+            forgotten, _ = self._lost.popitem(last=False)
+            if not self._lost_overflowed:
+                self._lost_overflowed = True
+                logger.info(
+                    "savings: lost-baseline memory full (MAX_LOST_KEYS=%d); requests "
+                    "without a baseline now price at the cache-read floor",
+                    MAX_LOST_KEYS,
+                )
+            # Unmarked, a stale baseline would price old items as new: drop it,
+            # so the conversation counts as lost under the overflow rule.
+            stale = self._previous.pop(forgotten, None)
+            if stale is not None:
+                self._stored -= len(stale[1])
 
 
 _ledger = ItemLedger()
@@ -509,6 +574,11 @@ def _compute(
         )
 
     removed = measure.removed
+    # With the baseline lost, the new items may be old ones the provider had
+    # cached. Their removal prices at the read rate, the floor of any input
+    # token: the cache ratio and minimum below describe a prefix the ledger no
+    # longer knows. Tokens Headroom added to new items stay at the miss rate.
+    floor = measure.removed_new + measure.grown_new if measure.baseline_lost else 0
     mix = usage.normalized() if usage is not None else None
     if mix is None or mix.billed <= 0:
         actual_rates = rates_for(measure.sent_tokens)
@@ -516,7 +586,9 @@ def _compute(
         if actual_rates is None or cf_rates is None:
             return _unpriced(measure, k=1.0, estimated=True)
         actual = measure.sent_tokens * actual_rates.uncached
-        counterfactual = (measure.sent_tokens + removed) * cf_rates.uncached
+        counterfactual = (
+            measure.sent_tokens + removed - floor
+        ) * cf_rates.uncached + floor * cf_rates.read
         return SavingsRecord(
             saved_usd=counterfactual - actual,
             actual_input_cost_usd=actual,
@@ -573,6 +645,8 @@ def _compute(
         # unchanged request exactly at the actual reads.
         blocks = (cf_read // OPENAI_CACHE_BLOCK_TOKENS) * OPENAI_CACHE_BLOCK_TOKENS
         cf_read = max(blocks, mix.read) if cf_read > mix.read else blocks
+    if floor > 0:
+        cf_read = min(cf_read + k * floor, cf_billed)
     # Everything else missed, written in the proportion the request wrote,
     # unless the counterfactual is smaller than anything shown cacheable: a
     # write it could not make would inflate the saving.

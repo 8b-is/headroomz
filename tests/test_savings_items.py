@@ -183,21 +183,105 @@ def test_settled_and_pending_items_share_one_budget(monkeypatch):
 
 
 def test_a_request_larger_than_the_budget_is_kept_up_to_the_budget(monkeypatch):
-    """Keeping nothing would freeze the baseline and price every later item
-    as new, at the miss rate, which overstates the saving. The first items are
-    kept instead, and records measured against them are marked estimated."""
+    """Keeping nothing would leave the next request with no baseline. The
+    first items are kept instead; a request measured against them may have
+    old items past the cut, so its baseline counts as lost. Each turn still
+    replaces the baseline, however large the conversation."""
     monkeypatch.setattr(savings, "MAX_STORED_ITEMS", 4)
+    ledger = ItemLedger()
+    big = _items("[]", '"s"', '"u1"', '"u2"', '"u3"')
+    m = _turn(ledger, big, big)
+    assert (m.aligned, m.baseline_lost) == (True, False)
+    longer = [*big, *_items('"u4"')]
+    m = _turn(ledger, longer, longer)
+    assert (m.sent_shared_prefix, m.aligned, m.baseline_lost) == (4, False, True)
+    assert not ledger._lost  # the cut-off rule fired, nothing was evicted
+    assert ledger._stored + ledger._pending_items <= 4
+
+
+def test_a_failed_turn_keeps_its_conversations_baseline(monkeypatch):
+    """Devin's #4240 example: admitting a four-item turn under a four-item
+    budget evicted the conversation's own baseline; the turn then got a 429,
+    and the next identical request saw no shared prefix at all."""
+    monkeypatch.setattr(savings, "MAX_STORED_ITEMS", 4)
+    ledger = ItemLedger()
+    turn = _items("[]", '"s"', '"u1"', '"u2"')
+    _turn(ledger, turn, turn)
+    _turn(ledger, turn, turn, succeeded=False)
+    assert _turn(ledger, turn, turn).sent_shared_prefix == 4
+
+
+def test_overlapping_turns_keep_the_baseline_until_one_succeeds(monkeypatch):
+    monkeypatch.setattr(savings, "MAX_STORED_ITEMS", 8)
     ledger = ItemLedger()
     base = _items("[]", '"s"', '"u1"')
     _turn(ledger, base, base)
-    grown = [*base, *_items('"u2"', '"u3"')]
-    m = _turn(ledger, grown, grown)
-    # Measured exactly against the baseline that fit.
-    assert (m.sent_shared_prefix, m.aligned) == (3, True)
-    longer = [*grown, *_items('"u4"')]
-    m = _turn(ledger, longer, longer)
-    assert (m.sent_shared_prefix, m.aligned) == (4, False)
-    assert ledger._stored + ledger._pending_items <= 4
+    first = [*base, *_items('"u2"')]
+    second = [*first, *_items('"u3"', '"u4"')]
+    m1 = ledger.measure("conv", first, first, _words)
+    # Three baseline items plus ten pending: the older turn goes, not the baseline.
+    m2 = ledger.measure("conv", second, second, _words)
+    ledger.settle(m2, succeeded=False)
+    ledger.settle(m1, succeeded=False)
+    m3 = ledger.measure("conv", first, first, _words)
+    # Still the old baseline, but the forgotten turn may have been cached.
+    assert (m3.sent_shared_prefix, m3.baseline_lost, m3.aligned) == (3, True, False)
+    ledger.settle(m3, succeeded=True)
+    m4 = _turn(ledger, second, second)
+    assert (m4.sent_shared_prefix, m4.baseline_lost, m4.aligned) == (4, False, True)
+
+
+def _probe(ledger, key, items):
+    m = ledger.measure(key, items, items, _words)
+    ledger.settle(m, succeeded=True)
+    return m
+
+
+def test_a_lost_baseline_is_flagged_and_a_new_conversation_is_not(monkeypatch):
+    monkeypatch.setattr(savings, "MAX_STORED_ITEMS", 4)
+    ledger = ItemLedger()
+    a, b, c = (_items("[]", f'"{n}1"', f'"{n}2"') for n in "abc")
+    assert not _probe(ledger, "a", a).baseline_lost
+    # Admitting b evicts a's baseline: another conversation, the least recent.
+    assert not _probe(ledger, "b", b).baseline_lost
+    again = _probe(ledger, "a", a)
+    assert (again.sent_shared_prefix, again.baseline_lost, again.aligned) == (0, True, False)
+    assert not _probe(ledger, "c", c).baseline_lost
+
+
+def test_past_the_loss_bound_every_missing_baseline_counts_as_lost(monkeypatch):
+    """Forgetting a loss must not let its conversation pass for a new one."""
+    monkeypatch.setattr(savings, "MAX_STORED_ITEMS", 4)
+    monkeypatch.setattr(savings, "MAX_LOST_KEYS", 1)
+    ledger = ItemLedger()
+    a, b, c, d = (_items("[]", f'"{n}1"', f'"{n}2"') for n in "abcd")
+    _probe(ledger, "a", a)
+    _probe(ledger, "b", b)  # loses a
+    _probe(ledger, "c", c)  # loses b; a's loss is forgotten
+    assert _probe(ledger, "a", a).baseline_lost
+    assert _probe(ledger, "d", d).baseline_lost
+
+
+def test_a_forgotten_loss_drops_the_stale_baseline_it_leaves(monkeypatch):
+    """a's newer request was evicted while its baseline survived. Once that
+    loss is forgotten, the stale baseline must not pass for a whole one, or
+    the evicted request's cached items would price as new."""
+    monkeypatch.setattr(savings, "MAX_STORED_ITEMS", 4)
+    monkeypatch.setattr(savings, "MAX_LOST_KEYS", 1)
+    ledger = ItemLedger()
+    one, two = _items('"x"'), _items("[]", '"y"')
+    _probe(ledger, "x", one)
+    _probe(ledger, "a", one)
+    a1 = ledger.measure("a", one, one, _words)
+    ledger.settle(ledger.measure("x", one, one, _words), succeeded=False)  # x used after a1
+    a2 = ledger.measure("a", one, one, _words)
+    ledger.measure("b", one, one, _words)  # evicts a1: a is lost, its baseline stays
+    ledger.settle(a1, succeeded=True)
+    ledger.settle(a2, succeeded=False)
+    assert "a" in ledger._lost
+    ledger.measure("c", two, two, _words)  # evicts x's baseline: a's loss is forgotten
+    m = ledger.measure("a", one, one, _words)
+    assert (m.baseline_lost, m.aligned) == (True, False)
 
 
 def test_a_measure_that_fails_releases_its_slot():
