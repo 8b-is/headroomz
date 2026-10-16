@@ -2229,7 +2229,10 @@ class HeadroomProxy(
 
         # Log component status
         if self._kompress_status == "enabled":
-            logger.info("Kompress: ENABLED (ModernBERT token compressor)")
+            if eager_status.get("kompress_backend") == "remote":
+                logger.info("Kompress: ENABLED (remote endpoint; no local model)")
+            else:
+                logger.info("Kompress: ENABLED (ModernBERT token compressor)")
         elif self._kompress_status == "deferred":
             if self._start_kompress_background_warmup():
                 logger.info("Kompress: DEFERRED (warming in the background after startup)")

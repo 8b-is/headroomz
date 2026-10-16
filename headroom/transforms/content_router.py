@@ -5198,7 +5198,12 @@ class ContentRouter(Transform):
         if self.config.enable_kompress:
             compressor = self._get_kompress()
             if compressor:
-                if not hasattr(compressor, "preload"):
+                if compressor is self._get_remote_kompress():
+                    # HEADROOM_KOMPRESS_ENDPOINT runs the model; there is no
+                    # local model to download or warm.
+                    status["kompress"] = "enabled"
+                    status["kompress_backend"] = "remote"
+                elif not hasattr(compressor, "preload"):
                     status["kompress"] = "enabled"
                     status["kompress_backend"] = "unknown"
                 else:
