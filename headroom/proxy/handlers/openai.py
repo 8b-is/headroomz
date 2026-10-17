@@ -22,6 +22,7 @@ from collections import OrderedDict
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import replace
 from datetime import datetime
+from types import MappingProxyType
 from typing import TYPE_CHECKING, Any
 from urllib.parse import quote, unquote, urlparse
 
@@ -55,6 +56,7 @@ from headroom.proxy.tool_schema_savings_policy import (
     net_hook_tool_saving,
     without_deferral_flags,
 )
+from headroom.proxy.turn_hooks import run_responses_create_hooks
 from headroom.proxy.upstream_guard import is_safe_upstream_url
 from headroom.proxy.ws_headers import WS_HOP_BY_HOP_HEADERS
 from headroom.proxy.ws_session_registry import (
@@ -1961,6 +1963,24 @@ class OpenAIHandlerMixin:
                 await traffic_learner.on_messages(learner_messages)
         except Exception as exc:
             logger.debug("[%s] Traffic learner (ws): %s", request_id, exc)
+
+    @staticmethod
+    async def _run_ws_create_hooks(
+        frame: Any, ws_headers: dict[str, str], connection_id: str
+    ) -> bool:
+        """Run ``on_responses_create`` on a WS create frame's inner payload.
+
+        True when a hook changed it, so the caller re-serializes the frame.
+        """
+        inner = frame.get("response", frame) if isinstance(frame, dict) else None
+        if not isinstance(inner, dict):
+            return False
+        return await run_responses_create_hooks(
+            inner,
+            headers=MappingProxyType(ws_headers),
+            transport="websocket",
+            connection_id=connection_id,
+        )
 
     @staticmethod
     def _headroom_bypass_enabled(headers: Any) -> bool:
@@ -5672,8 +5692,6 @@ class OpenAIHandlerMixin:
                 },
             )
 
-        model = body.get("model", "unknown")
-        stream = body.get("stream", False)
         body_mutation_tracker = BodyMutationTracker()
         _bypass = self._headroom_bypass_enabled(request.headers)
         if _bypass:
@@ -5693,8 +5711,17 @@ class OpenAIHandlerMixin:
             url=str(request.url),
             headers=dict(request.headers.items()),
             body=body,
-            metadata={"path": request.url.path, "stream": stream},
+            metadata={"path": request.url.path, "stream": body.get("stream", False)},
         )
+        # Before every stage that reads the body, so a hook's replacement is
+        # what compression, deferral, token counting, pricing and the
+        # stream/buffered dispatch all see.
+        if not _bypass and await run_responses_create_hooks(
+            body, headers=request.headers, transport="http"
+        ):
+            body_mutation_tracker.mark_mutated("responses_create_hook")
+        model = body.get("model", "unknown")
+        stream = body.get("stream", False)
 
         # /v1/responses uses provider-specific CompressionUnit extraction
         # below, then routes mutable text through ContentRouter. The
@@ -7662,6 +7689,19 @@ class OpenAIHandlerMixin:
             except json.JSONDecodeError:
                 # Not JSON — pass through as-is
                 pass
+            first_frame_is_create = isinstance(body, dict) and (
+                body.get("type") == "response.create" or ("type" not in body and "input" in body)
+            )
+            _ws_bypass = self._headroom_bypass_enabled(ws_headers)
+            if _ws_bypass:
+                logger.info(
+                    "[%s] WS /v1/responses passthrough reason=bypass_header mutation=disabled",
+                    request_id,
+                )
+            elif first_frame_is_create and await self._run_ws_create_hooks(
+                body, ws_headers, session_id
+            ):
+                first_msg_raw = json.dumps(body)
             if isinstance(body, dict) and body:
                 ws_response_body_for_store = (
                     body["response"] if isinstance(body.get("response"), dict) else body
@@ -7707,12 +7747,6 @@ class OpenAIHandlerMixin:
             ws_recorded_compression_timing_totals: dict[str, float] = {}
             ws_ttfb_ms: float | None = None
             ws_recorded_ttfb_ms = False
-            _ws_bypass = self._headroom_bypass_enabled(ws_headers)
-            if _ws_bypass:
-                logger.info(
-                    "[%s] WS /v1/responses passthrough reason=bypass_header mutation=disabled",
-                    request_id,
-                )
 
             capture_codex_wire_debug(
                 "ws_inbound_first_frame",
@@ -8144,9 +8178,7 @@ class OpenAIHandlerMixin:
                     logger.warning(f"[{request_id}] WS Memory injection failed: {e}")
                     return frame_raw
 
-            if isinstance(body, dict) and (
-                body.get("type") == "response.create" or ("type" not in body and "input" in body)
-            ):
+            if first_frame_is_create:
                 first_msg_raw = await _prepare_memory_frame(body, first_msg_raw)
                 first_response_body = body.get("response", body)
                 current_response_input = _responses_input_to_items(
@@ -8872,6 +8904,10 @@ class OpenAIHandlerMixin:
                                     inbound_response = _inbound_frame_body.get(
                                         "response", _inbound_frame_body
                                     )
+                                    if not _ws_bypass and await self._run_ws_create_hooks(
+                                        _inbound_frame_body, ws_headers, session_id
+                                    ):
+                                        msg = json.dumps(_inbound_frame_body)
                                     current_response_input = _responses_input_to_items(
                                         inbound_response.get("input")
                                         if isinstance(inbound_response, dict)
