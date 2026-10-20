@@ -666,3 +666,77 @@ def test_many_unwritable_ledgers_do_not_warn_on_every_cycle(
     assert len(warnings) == 65
     assert sum("append to" in w for w in warnings) == 64
     assert "More than 64 warnings about unwritable savings ledgers" in warnings[-1]
+
+
+_ROUTING = {
+    "decisions": 11,
+    "served_saving_usd": 0.057101,
+    "pairs": [
+        {
+            "requested": "claude-opus-5-5",
+            "served": "claude-opus-5-5",
+            "direction": "same",
+            "count": 5,
+            "measured": 0,
+            "savings_usd": 0.0,
+        },
+        {
+            "requested": "claude-sonnet-5-5",
+            "served": "claude-haiku-5-5",
+            "direction": "downgrade",
+            "count": 4,
+            "measured": 4,
+            "savings_usd": 0.057101,
+        },
+        {
+            "requested": "gpt-5.6-sol",
+            "served": "gpt-5.6-terra",
+            "direction": "downgrade",
+            "count": 2,
+            "measured": 0,
+            "savings_usd": 0.0,
+        },
+    ],
+}
+
+
+def test_cli_shows_the_proxys_routing_savings_beside_compression(monkeypatch, tmp_path):
+    from click.testing import CliRunner
+
+    from headroom.cli import savings as cli
+
+    _events_env(monkeypatch, tmp_path)
+    L.record_savings_event(tokens_before=1000, tokens_after=300, model=None, client="claude-code")
+    monkeypatch.setattr(cli, "_proxy_routing", lambda: _ROUTING)
+
+    out = CliRunner().invoke(cli.savings, []).output
+    assert "Model routing (lifetime): 6 of 11 requests moved · $0.0571 saved" in out
+    assert "claude-sonnet-5-5 → claude-haiku-5-5" in out
+    assert "not priced (no usage reported)" in out  # Sol -> Terra: a saving we cannot claim
+    assert "claude-opus-5-5 → claude-opus-5-5" not in out
+
+    data = json.loads(CliRunner().invoke(cli.savings, ["--json"]).output)
+    assert data["routing"]["served_saving_usd"] == 0.057101
+
+
+def test_cli_shows_routing_savings_before_any_compression(monkeypatch, tmp_path):
+    from click.testing import CliRunner
+
+    from headroom.cli import savings as cli
+
+    _events_env(monkeypatch, tmp_path)
+    monkeypatch.setattr(cli, "_proxy_routing", lambda: _ROUTING)
+    out = CliRunner().invoke(cli.savings, []).output
+    assert "No savings recorded yet." not in out
+    assert "$0.0571 saved" in out
+
+
+def test_proxy_routing_is_none_without_a_router(monkeypatch):
+    from headroom.cli import savings as cli
+
+    monkeypatch.setattr(
+        "headroom.install.health.probe_json", lambda url, timeout=2.0: {"routing": None}
+    )
+    assert cli._proxy_routing() is None
+    monkeypatch.setattr("headroom.install.health.probe_json", lambda url, timeout=2.0: None)
+    assert cli._proxy_routing() is None

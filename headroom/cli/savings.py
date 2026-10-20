@@ -4,11 +4,16 @@ Reads the append-only savings ledger (``~/.headroom/savings_events.jsonl``,
 written by both the MCP tool path and the proxy) and renders a cost-avoided
 summary with Today / Last 7 days / All time bars plus per-model and
 per-client breakdowns. Durable across restarts; aggregated on read.
+
+When the local proxy runs a model router (a routing-stats provider, see
+``headroom.proxy.routing_stats``), its savings are shown beside: what each
+moved request cost on the cheaper model against the model it asked for.
 """
 
 from __future__ import annotations
 
 import json
+import os
 from typing import Any
 
 import click
@@ -82,6 +87,50 @@ _BASIS_NOTES = {
 }
 
 
+def _proxy_routing() -> dict[str, Any] | None:
+    """The running proxy's routing rollup (``/stats`` ``routing``), or None.
+
+    None when no proxy answers or it routes nothing: the ledger sections are
+    unaffected either way, so a stopped proxy only hides this section.
+    """
+    from headroom.install.health import probe_json
+    from headroom.install.state import list_manifests
+
+    from .doctor import resolve_probe_port
+
+    env_port = os.environ.get("HEADROOM_PORT")
+    requested = int(env_port) if env_port and env_port.isdigit() else None
+    port = resolve_probe_port(requested, list_manifests())
+    stats = probe_json(f"http://127.0.0.1:{port}/stats", timeout=2.0)
+    routing = stats.get("routing") if isinstance(stats, dict) else None
+    if not isinstance(routing, dict) or not routing.get("decisions"):
+        return None
+    return routing
+
+
+def _echo_routing(routing: dict[str, Any]) -> None:
+    moved = [p for p in routing.get("pairs") or [] if p.get("direction") != "same"]
+    click.echo("")
+    click.echo(
+        f"Model routing (lifetime): {sum(int(p.get('count') or 0) for p in moved):,} "
+        f"of {int(routing.get('decisions') or 0):,} requests moved · "
+        f"{_money(float(routing.get('served_saving_usd') or 0.0))} saved"
+    )
+    for pair in moved:
+        pair_name = f"{pair.get('requested')} → {pair.get('served')}"
+        priced = int(pair.get("measured") or 0)
+        saved = (
+            _money(float(pair.get("savings_usd") or 0.0))
+            if priced
+            else "not priced (no usage reported)"
+        )
+        click.echo(f"  {pair_name:<44} {int(pair.get('count') or 0):,} requests  {saved}")
+    click.echo(
+        "  Saved = each moved request's usage priced on the model asked for, minus its cost "
+        "on the model served."
+    )
+
+
 def _echo_basis_note(basis: Any) -> None:
     """Print a caveat when the headline rests on something weaker than the catalog."""
     note = _BASIS_NOTES.get(str(basis or ""))
@@ -113,13 +162,17 @@ def savings(as_json: bool, days: int, reset: bool) -> None:
         return
 
     report = savings_ledger.aggregate_savings(retention_days=days)
+    routing = _proxy_routing()
 
     if as_json:
-        click.echo(json.dumps(report.to_dict(), indent=2))
+        click.echo(json.dumps({**report.to_dict(), "routing": routing}, indent=2))
         return
 
     lifetime = report.lifetime
     calls = int(lifetime.get("calls", 0) or 0)
+    if calls == 0 and routing is not None:
+        _echo_routing(routing)
+        return
     if calls == 0:
         click.echo("No savings recorded yet.")
         click.echo(
@@ -156,3 +209,6 @@ def savings(as_json: bool, days: int, reset: bool) -> None:
                 f"  {str(row['client']):<24} {int(row['calls']):,} calls · "
                 f"{_tokens(int(row['tokens_saved']))} tokens saved"
             )
+
+    if routing is not None:
+        _echo_routing(routing)
