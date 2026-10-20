@@ -108,23 +108,31 @@ def _proxy_routing() -> dict[str, Any] | None:
     return routing
 
 
+#: How the routing section names the provider's ``window`` (routing_stats contract).
+_ROUTING_WINDOWS = {"lifetime": "lifetime", "session": "this proxy session"}
+
+
 def _echo_routing(routing: dict[str, Any]) -> None:
-    moved = [p for p in routing.get("pairs") or [] if p.get("direction") != "same"]
+    # Per the routing_stats contract: a pair's `enforced` requests are the ones whose
+    # model was rewritten (holdouts and shadow decisions are not), and the saving is
+    # the sum of the pairs' signed `savings_usd`.
+    pairs = [p for p in routing.get("pairs") or [] if p.get("direction") != "same"]
+    moved = sum(int(p.get("enforced") or 0) for p in pairs)
+    saved = sum(float(p.get("savings_usd") or 0.0) for p in pairs)
+    window = _ROUTING_WINDOWS.get(str(routing.get("window")), "all decisions on record")
     click.echo("")
     click.echo(
-        f"Model routing (lifetime): {sum(int(p.get('count') or 0) for p in moved):,} "
-        f"of {int(routing.get('decisions') or 0):,} requests moved · "
-        f"{_money(float(routing.get('served_saving_usd') or 0.0))} saved"
+        f"Model routing ({window}): {moved:,} of {int(routing.get('decisions') or 0):,} "
+        f"requests moved · {_money(saved)} saved"
     )
-    for pair in moved:
+    for pair in pairs:
         pair_name = f"{pair.get('requested')} → {pair.get('served')}"
-        priced = int(pair.get("measured") or 0)
-        saved = (
+        priced = (
             _money(float(pair.get("savings_usd") or 0.0))
-            if priced
+            if int(pair.get("measured") or 0)
             else "not priced (no usage reported)"
         )
-        click.echo(f"  {pair_name:<44} {int(pair.get('count') or 0):,} requests  {saved}")
+        click.echo(f"  {pair_name:<44} {int(pair.get('enforced') or 0):,} moved  {priced}")
     click.echo(
         "  Saved = each moved request's usage priced on the model asked for, minus its cost "
         "on the model served."

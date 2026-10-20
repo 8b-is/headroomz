@@ -668,15 +668,17 @@ def test_many_unwritable_ledgers_do_not_warn_on_every_cycle(
     assert "More than 64 warnings about unwritable savings ledgers" in warnings[-1]
 
 
-_ROUTING = {
+_ROUTING = {  # what routemegood publishes, trimmed to the routing_stats contract
     "decisions": 11,
-    "served_saving_usd": 0.057101,
+    "window": "lifetime",
     "pairs": [
         {
             "requested": "claude-opus-5-5",
             "served": "claude-opus-5-5",
             "direction": "same",
             "count": 5,
+            "enforced": 0,
+            "holdout": 0,
             "measured": 0,
             "savings_usd": 0.0,
         },
@@ -684,7 +686,9 @@ _ROUTING = {
             "requested": "claude-sonnet-5-5",
             "served": "claude-haiku-5-5",
             "direction": "downgrade",
-            "count": 4,
+            "count": 5,
+            "enforced": 4,
+            "holdout": 1,
             "measured": 4,
             "savings_usd": 0.057101,
         },
@@ -693,6 +697,8 @@ _ROUTING = {
             "served": "gpt-5.6-terra",
             "direction": "downgrade",
             "count": 2,
+            "enforced": 2,
+            "holdout": 0,
             "measured": 0,
             "savings_usd": 0.0,
         },
@@ -710,13 +716,14 @@ def test_cli_shows_the_proxys_routing_savings_beside_compression(monkeypatch, tm
     monkeypatch.setattr(cli, "_proxy_routing", lambda: _ROUTING)
 
     out = CliRunner().invoke(cli.savings, []).output
+    # The headline is the sum of the pairs; a holdout stayed on Sonnet and is not moved.
     assert "Model routing (lifetime): 6 of 11 requests moved · $0.0571 saved" in out
     assert "claude-sonnet-5-5 → claude-haiku-5-5" in out
     assert "not priced (no usage reported)" in out  # Sol -> Terra: a saving we cannot claim
     assert "claude-opus-5-5 → claude-opus-5-5" not in out
 
     data = json.loads(CliRunner().invoke(cli.savings, ["--json"]).output)
-    assert data["routing"]["served_saving_usd"] == 0.057101
+    assert data["routing"]["pairs"][1]["savings_usd"] == 0.057101
 
 
 def test_cli_shows_routing_savings_before_any_compression(monkeypatch, tmp_path):
@@ -740,3 +747,15 @@ def test_proxy_routing_is_none_without_a_router(monkeypatch):
     assert cli._proxy_routing() is None
     monkeypatch.setattr("headroom.install.health.probe_json", lambda url, timeout=2.0: None)
     assert cli._proxy_routing() is None
+
+
+def test_cli_names_the_routing_window_the_provider_reports(monkeypatch, tmp_path):
+    from click.testing import CliRunner
+
+    from headroom.cli import savings as cli
+
+    _events_env(monkeypatch, tmp_path)
+    for window, label in (("session", "this proxy session"), (None, "all decisions on record")):
+        monkeypatch.setattr(cli, "_proxy_routing", lambda w=window: {**_ROUTING, "window": w})
+        out = CliRunner().invoke(cli.savings, []).output
+        assert f"Model routing ({label}): 6 of 11 requests moved" in out
