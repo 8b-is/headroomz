@@ -759,3 +759,15 @@ def test_cli_names_the_routing_window_the_provider_reports(monkeypatch, tmp_path
         monkeypatch.setattr(cli, "_proxy_routing", lambda w=window: {**_ROUTING, "window": w})
         out = CliRunner().invoke(cli.savings, []).output
         assert f"Model routing ({label}): 6 of 11 requests moved" in out
+
+
+def test_cli_without_a_router_never_mentions_routing(monkeypatch, tmp_path):
+    from click.testing import CliRunner
+
+    from headroom.cli import savings as cli
+
+    _events_env(monkeypatch, tmp_path)
+    L.record_savings_event(tokens_before=1000, tokens_after=300, model=None, client="claude-code")
+    monkeypatch.setattr(cli, "_proxy_routing", lambda: None)
+    assert "routing" not in CliRunner().invoke(cli.savings, []).output.lower()
+    assert "routing" not in json.loads(CliRunner().invoke(cli.savings, ["--json"]).output)

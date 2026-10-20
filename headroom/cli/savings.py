@@ -173,7 +173,10 @@ def savings(as_json: bool, days: int, reset: bool) -> None:
     routing = _proxy_routing()
 
     if as_json:
-        click.echo(json.dumps({**report.to_dict(), "routing": routing}, indent=2))
+        data = report.to_dict()
+        if routing is not None:  # no router installed: not even an empty key
+            data["routing"] = routing
+        click.echo(json.dumps(data, indent=2))
         return
 
     lifetime = report.lifetime
