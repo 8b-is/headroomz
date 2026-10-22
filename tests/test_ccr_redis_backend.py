@@ -131,15 +131,21 @@ def test_a_prefix_with_glob_characters_matches_only_itself(server, monkeypatch):
 
 def test_stats_and_retrieval_never_read_or_rewrite_whole_entries(server, monkeypatch):
     store = _replica(server)
-    hashes = [store.store(f"original {i} " * 40, f"short {i}") for i in range(5)]
+    hashes = [
+        store.store(f"original {i} " * 40, f"short {i}", original_tokens=80, compressed_tokens=2)
+        for i in range(5)
+    ]
     reads, writes = [], []
     monkeypatch.setattr(fakeredis.FakeRedis, "get", lambda self, k: reads.append(k))
     stats = store.get_stats()
     assert stats["entry_count"] == 5 and not reads
+    # Numeric totals (/stats contract): what this replica stored and retrieved.
+    assert (stats["total_original_tokens"], stats["total_retrievals"]) == (400, 0)
     monkeypatch.undo()
     monkeypatch.setattr(fakeredis.FakeRedis, "set", lambda self, *a, **kw: writes.append(a))
     assert store.retrieve(hashes[0]) is not None
     assert not writes
+    assert store.get_stats()["total_retrievals"] == 1
 
 
 def test_credentials_in_a_redis_error_are_not_logged(caplog):

@@ -284,6 +284,9 @@ class CompressionStore:
         # it on every store would scan the shared keyspace, and evicting would
         # remove other replicas' live entries.
         self._backend_expires_entries = bool(getattr(self._backend, "expires_entries", False))
+        # A shared store's totals, as this process contributed them since it
+        # started: [original tokens stored, compressed tokens stored, retrievals].
+        self._own_totals = [0, 0, 0]
         self._backend_revision = self._read_backend_revision()
 
     @property
@@ -453,6 +456,9 @@ class CompressionStore:
 
             self._backend.set(hash_key, entry)
             if self._backend_expires_entries:
+                if existing is None:
+                    self._own_totals[0] += entry.original_tokens
+                    self._own_totals[1] += entry.compressed_tokens
                 return hash_key  # no local index: Redis expires it
             # MEDIUM FIX #16: Add to eviction heap for O(log n) eviction
             heapq.heappush(self._eviction_heap, (entry.created_at, hash_key))
@@ -496,7 +502,9 @@ class CompressionStore:
             # Update the backend with the modified entry. Not a shared store:
             # writing the whole entry back per read races other replicas and
             # resends the original; retrieval events below stay per process.
-            if not self._backend_expires_entries:
+            if self._backend_expires_entries:
+                self._own_totals[2] += 1
+            else:
                 self._backend.set(hash_key, entry)
 
             # Log retrieval event
@@ -666,16 +674,21 @@ class CompressionStore:
     def get_stats(self) -> dict[str, Any]:
         """Get store statistics for monitoring."""
         if self._backend_expires_entries:
-            # Totals would read every replica's entries (a GET each) under the
-            # lock retrievals take; a shared store reports its count only.
+            # Totals over the store would read every replica's entries (a GET
+            # each) under the lock retrievals take: a shared store reports the
+            # entry count across replicas, and the totals this replica added
+            # since it started ("totals_scope").
             backend_stats = self._backend.get_stats()
+            with self._lock:
+                original, compressed, retrievals = self._own_totals
             return {
                 "entry_count": backend_stats["entry_count"],
                 "max_entries": self._max_entries,
                 "default_ttl_seconds": self._default_ttl,
-                "total_original_tokens": None,
-                "total_compressed_tokens": None,
-                "total_retrievals": None,
+                "total_original_tokens": original,
+                "total_compressed_tokens": compressed,
+                "total_retrievals": retrievals,
+                "totals_scope": "this_replica",
                 "event_count": len(self._retrieval_events),
                 "backend": backend_stats,
             }
