@@ -1,0 +1,102 @@
+"""One CCR store for every replica: HEADROOM_CCR_BACKEND=redis.
+
+Behind a gateway that spreads requests across replicas, the retrieval of a
+<<ccr:hash>> marker can land on a replica other than the one that compressed.
+"""
+
+from __future__ import annotations
+
+import pytest
+
+fakeredis = pytest.importorskip("fakeredis")
+
+from headroom.cache.backends.redis import RedisBackend  # noqa: E402
+from headroom.cache.compression_store import (  # noqa: E402
+    CompressionStore,
+    _create_default_ccr_backend,
+)
+
+
+@pytest.fixture
+def server():
+    return fakeredis.FakeServer()
+
+
+def _replica(server) -> CompressionStore:
+    backend = RedisBackend("redis://localhost", client=fakeredis.FakeRedis(server=server))
+    return CompressionStore(backend=backend)
+
+
+def test_a_marker_made_on_one_replica_is_retrieved_on_another(server):
+    hash_key = _replica(server).store("the full original output " * 50, "short")
+    entry = _replica(server).retrieve(hash_key)
+    assert entry is not None and entry.original_content.startswith("the full original output")
+
+
+def test_an_entry_expires_in_redis_when_it_expires(server):
+    store = _replica(server)
+    hash_key = store.store("original " * 40, "short", ttl=60)
+    ttl_ms = fakeredis.FakeRedis(server=server).pttl(f"headroom:ccr:{hash_key}")
+    assert 0 < ttl_ms <= 60_000
+
+
+def test_deployments_with_different_prefixes_do_not_share(server, monkeypatch):
+    hash_key = _replica(server).store("original " * 40, "short")
+    monkeypatch.setenv("HEADROOM_REDIS_KEY_PREFIX", "staging")
+    assert _replica(server).retrieve(hash_key) is None
+
+
+def test_redis_down_is_a_miss_and_never_fails_compression(monkeypatch):
+    import redis
+
+    class Down(fakeredis.FakeRedis):
+        def execute_command(self, *args, **kwargs):
+            raise redis.ConnectionError("connection refused")
+
+    store = CompressionStore(backend=RedisBackend("redis://localhost", client=Down()))
+    hash_key = store.store("original " * 40, "short")  # no raise
+    assert store.retrieve(hash_key) is None
+
+
+def test_a_corrupt_entry_is_a_miss(server):
+    store = _replica(server)
+    fakeredis.FakeRedis(server=server).set("headroom:ccr:abc123def456", "not json")
+    assert store.retrieve("abc123def456") is None
+
+
+def test_the_env_selects_the_redis_backend(monkeypatch):
+    monkeypatch.setenv("HEADROOM_CCR_BACKEND", "redis")
+    monkeypatch.setenv("HEADROOM_REDIS_URL", "redis://127.0.0.1:6399/0")
+    assert isinstance(_create_default_ccr_backend(), RedisBackend)
+
+
+def test_a_url_that_is_not_redis_falls_back_to_the_local_store(monkeypatch):
+    monkeypatch.setenv("HEADROOM_CCR_BACKEND", "redis")
+    monkeypatch.setenv("HEADROOM_REDIS_URL", "memcached://cache:11211")
+    assert _create_default_ccr_backend() is None
+
+
+def test_redis_is_skipped_for_a_while_after_a_connection_error():
+    import redis
+
+    calls = []
+
+    class Down(fakeredis.FakeRedis):
+        def execute_command(self, *args, **kwargs):
+            calls.append(args[0])
+            raise redis.ConnectionError("connection refused")
+
+    backend = RedisBackend("redis://localhost", client=Down())
+    for _ in range(5):
+        backend.get("abc123def456")
+    assert len(calls) == 1  # one failure, then back-off
+
+
+def test_storing_never_scans_the_shared_keyspace(server, monkeypatch):
+    # A per-replica cap would count (SCAN) the whole store on every write and
+    # evict other replicas' live entries; Redis expires entries by TTL.
+    store = _replica(server)
+    store._max_entries = 2
+    monkeypatch.setattr(RedisBackend, "_scan", lambda self: pytest.fail("scanned"))
+    hashes = [store.store(f"original {i} " * 40, f"short {i}") for i in range(5)]
+    assert all(store.retrieve(h) is not None for h in hashes)

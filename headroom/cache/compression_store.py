@@ -279,6 +279,11 @@ class CompressionStore:
         self._heap_rebuild_threshold = 0.5
         external_revision = getattr(self._backend, "external_revision", None)
         self._backend_revision_reader = external_revision if callable(external_revision) else None
+        # A backend that expires entries itself and is shared by replicas
+        # (Redis) is bounded by TTL, not by this process's max_entries: counting
+        # it on every store would scan the shared keyspace, and evicting would
+        # remove other replicas' live entries.
+        self._backend_expires_entries = bool(getattr(self._backend, "expires_entries", False))
         self._backend_revision = self._read_backend_revision()
 
     @property
@@ -424,7 +429,8 @@ class CompressionStore:
             # turn a marker is re-encountered, so duplicate stores are common.
             existing = self._backend.get(hash_key)
             if existing is None:
-                self._evict_if_needed()
+                if not self._backend_expires_entries:
+                    self._evict_if_needed()
             else:
                 # Hash already present. Different content means a true (extremely
                 # rare with SHA256[:24]) collision; same content is a duplicate
@@ -1155,8 +1161,10 @@ def _create_default_ccr_backend() -> CompressionStoreBackend | None:
     Default (env unset or "sqlite"): SQLiteBackend at workspace_dir()/ccr_store.db
     — restart-safe and shared across worker processes, which the
     session-scale 30-minute TTL assumes.
-    "memory" opts back into the in-process dict. Other values load
-    adapters via setuptools entry point 'headroom.ccr_backend'.
+    "memory" opts back into the in-process dict. "redis" shares one store
+    across replicas (HEADROOM_REDIS_URL; headroom.cache.backends.redis) unless a
+    plugin registers that name. Other values load adapters via setuptools entry
+    point 'headroom.ccr_backend'.
     Returns None to use InMemoryBackend.
 
     Stateless mode (``--stateless`` / ``HEADROOM_STATELESS``) never opens the
@@ -1193,6 +1201,12 @@ def _create_default_ccr_backend() -> CompressionStoreBackend | None:
 
         all_eps = entry_points(group="headroom.ccr_backend")
         ep = next((e for e in all_eps if e.name == backend_type), None)
+        if ep is None and backend_type == "redis":
+            # Built in: one store for every replica behind a gateway. A plugin
+            # registered as "redis" still wins, above.
+            from .backends.redis import RedisBackend
+
+            return RedisBackend(os.environ.get("HEADROOM_REDIS_URL", "").strip())
         if ep is None:
             logger.warning(
                 "HEADROOM_CCR_BACKEND=%s but no entry point headroom.ccr_backend[%s]",
