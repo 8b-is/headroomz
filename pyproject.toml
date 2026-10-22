@@ -195,7 +195,7 @@ relevance = [
 # `headroom/image/compressor.py` adapts both API shapes at runtime via
 # a try/except cascade. See issue #372 for context.
 image = [
-    "pillow>=12.3.0",         # PYSEC-2026-2253/2254/2255/2256/2257 fixes (decompression-bomb + cmd-injection)
+    "pillow>=12.3.0",         # PYSEC-2026-2253..2257; uv.lock takes 13.0.0 (see override-dependencies)
     "sentencepiece>=0.1.99",  # Required by SigLIP tokenizer (SiglipTokenizer)
     # Python 3.6–3.12: keep the proven ORT-bundled package directly.
     # ~15 MB ONNX models auto-downloaded on first use.
@@ -424,6 +424,20 @@ constraint-dependencies = [
 # then breaks CI on every public runner that can't reach the mirror.
 # Declaring the index in pyproject.toml makes the project authoritative
 # regardless of who runs `uv lock`.
+# fastembed (0.9.0, latest) caps pillow <13, but Pillow 13.0.0 is the only fix
+# for CVE-2026-112390..112401 (decoder bugs on untrusted images, which
+# headroom.image opens). fastembed imports PIL only for its image models;
+# Headroom uses its text models. Checked: fastembed text embedding and
+# Headroom's image tests pass on Pillow 13. This applies to uv.lock (CI,
+# release images, uv installs); the package metadata keeps pillow>=12.3.0 so
+# `pip install headroom-ai[all]` still resolves against fastembed's cap.
+# Drop this override once fastembed allows Pillow 13.
+# Pillow 13 needs Python 3.11; on 3.10 no fixed release exists.
+override-dependencies = [
+    "pillow>=13.0.0; python_version >= '3.11'",
+    "pillow>=12.3.0,<13; python_version < '3.11'",
+]
+
 [[tool.uv.index]]
 name = "pypi"
 url = "https://pypi.org/simple/"
