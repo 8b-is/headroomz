@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import threading
 import time
 from collections.abc import Callable
@@ -104,7 +105,7 @@ class Guard:
                         self._feature,
                         what,
                         type(exc).__name__,
-                        exc,
+                        _redact(str(exc)),
                     )
             return default
         if what in self._failing:
@@ -113,3 +114,8 @@ class Guard:
                     self._failing.discard(what)
                     logger.info("%s: Redis %s works again", self._feature, what)
         return result
+
+
+def _redact(message: str) -> str:
+    """``message`` with any URL credentials (``//user:password@``) masked."""
+    return re.sub(r"//[^/@\s]*@", "//***@", message)

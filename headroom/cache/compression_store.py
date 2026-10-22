@@ -493,8 +493,11 @@ class CompressionStore:
 
             # Track access for feedback
             entry.record_access(query)
-            # Update the backend with the modified entry
-            self._backend.set(hash_key, entry)
+            # Update the backend with the modified entry. Not a shared store:
+            # writing the whole entry back per read races other replicas and
+            # resends the original; retrieval events below stay per process.
+            if not self._backend_expires_entries:
+                self._backend.set(hash_key, entry)
 
             # Log retrieval event
             if self._enable_feedback:
@@ -662,6 +665,20 @@ class CompressionStore:
 
     def get_stats(self) -> dict[str, Any]:
         """Get store statistics for monitoring."""
+        if self._backend_expires_entries:
+            # Totals would read every replica's entries (a GET each) under the
+            # lock retrievals take; a shared store reports its count only.
+            backend_stats = self._backend.get_stats()
+            return {
+                "entry_count": backend_stats["entry_count"],
+                "max_entries": self._max_entries,
+                "default_ttl_seconds": self._default_ttl,
+                "total_original_tokens": None,
+                "total_compressed_tokens": None,
+                "total_retrievals": None,
+                "event_count": len(self._retrieval_events),
+                "backend": backend_stats,
+            }
         with self._lock:
             # Clean expired entries
             self._clean_expired()
@@ -712,7 +729,9 @@ class CompressionStore:
 
             return ComponentStats(
                 name="compression_store",
-                entry_count=self._backend.count(),
+                entry_count=backend_stats.get("entry_count", 0)
+                if self._backend_expires_entries
+                else self._backend.count(),
                 size_bytes=bytes_used,
                 budget_bytes=None,  # No budget set yet
                 # A shared store would be read whole to count these.
