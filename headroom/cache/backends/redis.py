@@ -43,13 +43,16 @@ class RedisBackend:
         raw = self._guard.call("read", lambda: self._client.get(self._key(hash_key)), None)
         return None if raw is None else _decode(raw)
 
-    def set(self, hash_key: str, entry: CompressionEntry) -> None:
+    def set(self, hash_key: str, entry: CompressionEntry) -> bool:
+        """Whether Redis took the entry (an error is logged, not raised)."""
         remaining_ms = int((entry.created_at + entry.ttl - time.time()) * 1000)
         if remaining_ms <= 0:
-            return
+            return False
         blob = json.dumps(asdict(entry))
-        self._guard.call(
-            "write", lambda: self._client.set(self._key(hash_key), blob, px=remaining_ms), None
+        return bool(
+            self._guard.call(
+                "write", lambda: self._client.set(self._key(hash_key), blob, px=remaining_ms), None
+            )
         )
 
     def delete(self, hash_key: str) -> bool:

@@ -159,3 +159,16 @@ def test_credentials_in_a_redis_error_are_not_logged(caplog):
     with caplog.at_level("WARNING", logger="headroom.cache.redis_client"):
         assert backend.get("abc") is None
     assert "s3cret" not in caplog.text and "//***@cache" in caplog.text
+
+
+def test_a_write_redis_refuses_adds_no_tokens(caplog):
+    import redis
+
+    class Full(fakeredis.FakeRedis):
+        def set(self, *args, **kwargs):
+            raise redis.ResponseError("OOM command not allowed")
+
+    store = CompressionStore(backend=RedisBackend("redis://localhost", client=Full()))
+    store.store("original " * 40, "short", original_tokens=80, compressed_tokens=2)
+    stats = store.get_stats()
+    assert (stats["total_original_tokens"], stats["totals_scope"]) == (0, "this_replica")

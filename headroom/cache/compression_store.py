@@ -454,9 +454,9 @@ class CompressionStore:
                 # Mark old heap entry as stale since we're replacing it.
                 self._mark_heap_entries_stale()
 
-            self._backend.set(hash_key, entry)
+            written = self._backend.set(hash_key, entry)
             if self._backend_expires_entries:
-                if existing is None:
+                if existing is None and written is not False:
                     self._own_totals[0] += entry.original_tokens
                     self._own_totals[1] += entry.compressed_tokens
                 return hash_key  # no local index: Redis expires it
