@@ -45,6 +45,7 @@ import re
 import sys
 import threading
 import time
+from collections import OrderedDict
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from contextvars import ContextVar, copy_context
@@ -1558,21 +1559,54 @@ def _netcost_message_tokens(message: dict[str, Any], tokenizer: Tokenizer) -> in
     return count_content_blocks(content, tokenizer.count_text)
 
 
-class CompressionCache:
-    """Two-tier compression cache with TTL.  Thread-safe.
+#: Default memory budget of the router's compression cache, in MB
+#: (``HEADROOM_COMPRESSION_CACHE_MB``).
+DEFAULT_COMPRESSION_CACHE_MB = 64
+#: Bytes a cache entry costs beyond its text (key, tuple, dict slot).
+_CACHE_ENTRY_OVERHEAD = 256
+#: Skip-tier entries kept per MB of budget (each is a key and a timestamp).
+_SKIP_ENTRIES_PER_MB = 2000
 
-    Tier 1 (skip set): content hashes that won't compress — instant skip,
-    near-zero memory (just ints in a set).
+
+def _compression_cache_budget_bytes() -> int:
+    raw = os.environ.get("HEADROOM_COMPRESSION_CACHE_MB", "").strip()
+    try:
+        mb = float(raw) if raw else DEFAULT_COMPRESSION_CACHE_MB
+    except ValueError:
+        logger.warning(
+            "HEADROOM_COMPRESSION_CACHE_MB=%r is not a number; using %d MB",
+            raw,
+            DEFAULT_COMPRESSION_CACHE_MB,
+        )
+        mb = DEFAULT_COMPRESSION_CACHE_MB
+    return max(1, int(mb * 1024 * 1024))
+
+
+def content_cache_key(content: str, target_ratio: float | None, gated: bool = False) -> str:
+    """The compression cache's key for ``content``: a digest, the same in every
+    process, so the disk tier (and replicas sharing it) can use it. The runtime
+    target ratio is part of it (a different ratio is a different result), and so
+    is the reversibility gate tool output passes (#1307)."""
+    h = hashlib.blake2b(digest_size=16)
+    h.update(f"{target_ratio!r}|{int(gated)}|".encode())
+    h.update(content.encode("utf-8", "surrogatepass"))
+    return h.hexdigest()
+
+
+class CompressionCache:
+    """Two-tier compression cache with TTL and a memory budget.  Thread-safe.
+
+    Tier 1 (skip set): content keys that won't compress — instant skip.
 
     Tier 2 (result cache): compressed results for content that DID compress —
     reuse the compressed text on subsequent requests.
 
-    Entries expire after TTL (default 30min). No max-entries cap — TTL is the
-    natural bound. Memory grows proportional to compressible content × TTL,
-    which is bounded by session duration.
-
-    Uses in-process dict for ultra-fast lookups (~100ns). Could be backed
-    by memcached/Redis for multi-process deployments.
+    Memory is bounded: results are kept in least-recently-used order within
+    ``max_bytes`` (``HEADROOM_COMPRESSION_CACHE_MB``, default 64), the skip set
+    within a matching entry count, and entries expire after ``ttl_seconds``.
+    With a ``store`` (the proxy's :class:`~headroom.cache.result_store.ResultStore`),
+    every result is also written to disk and an entry the budget evicted is
+    read back from there instead of compressed again.
 
     Thread safety: a ``threading.Lock`` guards all read-modify-write
     operations.  The ``apply()`` path runs compression inside a
@@ -1581,20 +1615,30 @@ class CompressionCache:
     wasteful) and metrics counters would drift.
     """
 
-    def __init__(self, ttl_seconds: int = 1800):
+    def __init__(
+        self,
+        ttl_seconds: int = 1800,
+        max_bytes: int | None = None,
+        store: Any = None,
+    ):
         import threading
 
-        # Tier 2: compressed results {hash: (text, ratio, strategy, timestamp)}
-        self._results: dict[int, tuple[str, float, str, float]] = {}
-        # Tier 1: hashes of content that won't compress {hash: timestamp}
-        self._skip: dict[int, float] = {}
+        # Tier 2: {key: (text, ratio, strategy, created_at)}, least recently used first.
+        self._results: OrderedDict[str, tuple[str, float, str, float]] = OrderedDict()
+        self._bytes = 0
+        # Tier 1: {key: marked_at}, oldest first.
+        self._skip: OrderedDict[str, float] = OrderedDict()
+        self._max_bytes = max_bytes if max_bytes is not None else _compression_cache_budget_bytes()
+        self._max_skip = max(1000, self._max_bytes // (1024 * 1024) * _SKIP_ENTRIES_PER_MB)
+        self._store = store
         # Callbacks invoked (outside the lock) whenever ``clear()`` runs, so
-        # sibling state keyed by the same content hashes (e.g. the router's
+        # sibling state keyed by the same content keys (e.g. the router's
         # frozen-verdict store) can be reset in lock-step with the cache.
         self._on_clear: list[Any] = []
         self._ttl_seconds = ttl_seconds
         # Metrics
         self._hits = 0
+        self._disk_hits = 0
         self._misses = 0
         self._skip_hits = 0
         self._evictions = 0
@@ -1602,7 +1646,7 @@ class CompressionCache:
         self._lookup_count = 0
         self._lock = threading.Lock()
 
-    def get(self, key: int) -> tuple[str, float, str] | None:
+    def get(self, key: str) -> tuple[str, float, str] | None:
         """Get cached compression result.  Thread-safe.
 
         Returns (compressed_text, ratio, strategy) or None if not found/expired.
@@ -1614,19 +1658,23 @@ class CompressionCache:
             if entry is not None:
                 compressed, ratio, strategy, created_at = entry
                 if (time.monotonic() - created_at) < self._ttl_seconds:
+                    self._results.move_to_end(key)
                     self._hits += 1
-                    self._total_lookup_ns += time.perf_counter_ns() - t0
-                    self._lookup_count += 1
+                    self._record_lookup(t0)
                     return (compressed, ratio, strategy)
-                else:
-                    del self._results[key]
-                    self._evictions += 1
-            self._misses += 1
-            self._total_lookup_ns += time.perf_counter_ns() - t0
-            self._lookup_count += 1
-            return None
+                self._drop_locked(key)
+                self._evictions += 1
+        found = self._store.get(key) if self._store is not None else None
+        with self._lock:
+            if found is not None:
+                self._admit_locked(key, *found)
+                self._disk_hits += 1
+            else:
+                self._misses += 1
+            self._record_lookup(t0)
+        return found
 
-    def is_skipped(self, key: int) -> bool:
+    def is_skipped(self, key: str) -> bool:
         """Check if content is known non-compressible (Tier 1).  Thread-safe."""
         with self._lock:
             ts = self._skip.get(key)
@@ -1634,27 +1682,55 @@ class CompressionCache:
                 if (time.monotonic() - ts) < self._ttl_seconds:
                     self._skip_hits += 1
                     return True
-                else:
-                    del self._skip[key]
-                    self._evictions += 1
+                del self._skip[key]
+                self._evictions += 1
             return False
 
-    def put(self, key: int, compressed: str, ratio: float, strategy: str) -> None:
+    def put(self, key: str, compressed: str, ratio: float, strategy: str) -> None:
         """Store a compressed result (Tier 2).  Thread-safe."""
         with self._lock:
-            self._results[key] = (compressed, ratio, strategy, time.monotonic())
+            self._admit_locked(key, compressed, ratio, strategy)
+        if self._store is not None:
+            self._store.put(key, compressed, ratio, strategy)
 
-    def mark_skip(self, key: int) -> None:
+    def mark_skip(self, key: str) -> None:
         """Mark content as non-compressible (Tier 1).  Thread-safe."""
         with self._lock:
-            self._skip[key] = time.monotonic()
+            self._skip_locked(key)
 
-    def move_to_skip(self, key: int) -> None:
+    def move_to_skip(self, key: str) -> None:
         """Move a result to skip set (threshold tightened, no longer qualifies).
         Thread-safe."""
         with self._lock:
-            self._results.pop(key, None)
-            self._skip[key] = time.monotonic()
+            self._drop_locked(key)
+            self._skip_locked(key)
+        if self._store is not None:
+            self._store.delete(key)
+
+    def _admit_locked(self, key: str, compressed: str, ratio: float, strategy: str) -> None:
+        self._drop_locked(key)
+        self._results[key] = (compressed, ratio, strategy, time.monotonic())
+        self._bytes += sys.getsizeof(compressed) + _CACHE_ENTRY_OVERHEAD
+        # Least recently used first; the entry just added always stays.
+        while self._bytes > self._max_bytes and len(self._results) > 1:
+            self._drop_locked(next(iter(self._results)))
+            self._evictions += 1
+
+    def _drop_locked(self, key: str) -> None:
+        entry = self._results.pop(key, None)
+        if entry is not None:
+            self._bytes -= sys.getsizeof(entry[0]) + _CACHE_ENTRY_OVERHEAD
+
+    def _skip_locked(self, key: str) -> None:
+        self._skip.pop(key, None)
+        self._skip[key] = time.monotonic()
+        while len(self._skip) > self._max_skip:
+            self._skip.popitem(last=False)
+            self._evictions += 1
+
+    def _record_lookup(self, t0: int) -> None:
+        self._total_lookup_ns += time.perf_counter_ns() - t0
+        self._lookup_count += 1
 
     @property
     def size(self) -> int:
@@ -1672,10 +1748,13 @@ class CompressionCache:
             avg_ns = self._total_lookup_ns / self._lookup_count if self._lookup_count else 0
             return {
                 "cache_hits": self._hits,
+                "cache_disk_hits": self._disk_hits,
                 "cache_skip_hits": self._skip_hits,
                 "cache_misses": self._misses,
                 "cache_evictions": self._evictions,
                 "cache_size": len(self._results),
+                "cache_bytes": self._bytes,
+                "cache_max_bytes": self._max_bytes,
                 "cache_skip_size": len(self._skip),
                 "cache_avg_lookup_ns": avg_ns,
             }
@@ -1683,7 +1762,7 @@ class CompressionCache:
     def register_on_clear(self, callback: Any) -> None:
         """Register a callback fired (outside the lock) on every ``clear()``.
 
-        Lets state keyed by the same content hashes — e.g. the router's
+        Lets state keyed by the same content keys — e.g. the router's
         ``_frozen_verdicts`` store — be reset together with the cache so it
         cannot outlive the results/skip tiers it shadows.
         """
@@ -1693,7 +1772,10 @@ class CompressionCache:
         """Clear all entries (e.g., on session end).  Thread-safe."""
         with self._lock:
             self._results.clear()
+            self._bytes = 0
             self._skip.clear()
+        if self._store is not None:
+            self._store.clear()
         # Fire callbacks outside the lock to avoid cross-lock ordering issues.
         for callback in self._on_clear:
             callback()
@@ -1945,6 +2027,12 @@ class ContentRouterConfig:
     # emits a `<<ccr:…>>` / `Retrieve …` retrieval marker. SmartCrusher is
     # additionally forced marker-free via smart_crusher_lossless_only.
     lossless: bool = False
+
+    # Back the compression cache with a SQLite file (see
+    # headroom.cache.result_store) so results its memory budget evicts, or a
+    # restart loses, come back without compressing again. The proxy turns it on;
+    # library callers keep the cache in memory unless they ask.
+    result_cache_disk: bool = False
     # Cross-turn (whole-conversation) verbatim de-dup. Replaces a contiguous span
     # in a later tool output that already appeared verbatim in an earlier tool
     # output with an in-context pointer. Prefix-monotonic (cache-safe) and
@@ -2455,7 +2543,12 @@ class ContentRouter(Transform):
         # are not gated. Now backed by the #3486 ContextVar state — see
         # the ``_runtime_compression_policy`` property below.
 
-        self._cache = CompressionCache()
+        store = None
+        if self.config.result_cache_disk:
+            from ..cache.result_store import open_result_store
+
+            store = open_result_store(ttl_seconds=1800)
+        self._cache = CompressionCache(store=store)
 
         # Cache-churn fix (HEADROOM_FREEZE_BLOCK_DECISION, default off):
         # freeze each block's compress-vs-passthrough verdict on first
@@ -2473,7 +2566,7 @@ class ContentRouter(Transform):
         # the parallel compression pass writes verdicts from worker threads, so
         # we match that posture with a dedicated lock rather than relying on
         # GIL atomicity (which would not protect the read-then-evict sequence).
-        self._frozen_verdicts: dict[int, bool] = {}
+        self._frozen_verdicts: dict[str, bool] = {}
         # The store is process-wide (one router per pipeline, shared by every
         # session), so the cap must scale with the number of CONCURRENT
         # sessions, not one user's workload: at org scale (many users behind
@@ -2636,7 +2729,7 @@ class ContentRouter(Transform):
             f"preserved_chars~={preserved} (cache bust avoided)"
         )
 
-    def _record_frozen_verdict(self, content_key: int, verdict: bool) -> None:
+    def _record_frozen_verdict(self, content_key: str, verdict: bool) -> None:
         """Record a frozen verdict (thread-safe, bounded FIFO eviction).
 
         Caps the store at ``_frozen_verdicts_max`` entries, evicting the
@@ -2653,7 +2746,7 @@ class ContentRouter(Transform):
                 del self._frozen_verdicts[oldest]
             self._frozen_verdicts[content_key] = verdict
 
-    def _get_frozen_verdict(self, content_key: int) -> bool | None:
+    def _get_frozen_verdict(self, content_key: str) -> bool | None:
         """Read a frozen verdict (thread-safe). Returns None if absent."""
         with self._frozen_lock:
             return self._frozen_verdicts.get(content_key)
@@ -6136,7 +6229,7 @@ class ContentRouter(Transform):
         # enforce_reversibility, precomputed_detection). The detection is the one
         # already computed in the routing loop below, threaded through so a
         # cache-miss message is not re-detected inside compress().
-        _PendingTask = tuple[int, str, str, float, int, bool, "DetectionResult | None"]
+        _PendingTask = tuple[int, str, str, float, str, bool, "DetectionResult | None"]
         pending_tasks: list[_PendingTask] = []
 
         # #856 P2b (flag-gated, default off): net-cost frozen-floor unlock.
@@ -6476,13 +6569,13 @@ class ContentRouter(Transform):
             # Tier 2 (result): known compresses → reuse compressed text.
             # Key on the runtime target_ratio too: the same content compressed at
             # a different ratio is a different result, so it must not alias.
-            content_key = hash((content, getattr(self, "_runtime_target_ratio", None)))
             # Tool ground truth is gated against lossy-unrecoverable results below
             # (#1307). Partition its cache namespace so a gated tool entry is never
             # served from — or poisons — an ungated entry for byte-identical content.
             enforce_reversibility = role == "tool"
-            if enforce_reversibility:
-                content_key = hash((content_key, True))
+            content_key = content_cache_key(
+                content, getattr(self, "_runtime_target_ratio", None), gated=enforce_reversibility
+            )
 
             # Tier 1: skip set — instant rejection
             if self._cache.is_skipped(content_key):
@@ -7546,7 +7639,9 @@ class ContentRouter(Transform):
                     # Two-tier compression cache → shared helper
                     compressed_content, was_compressed = self._compress_block_content(
                         content=tool_text,
-                        content_key=hash((tool_text, getattr(self, "_runtime_target_ratio", None))),
+                        content_key=content_cache_key(
+                            tool_text, getattr(self, "_runtime_target_ratio", None)
+                        ),
                         context=block_context,
                         bias=bias,
                         min_ratio=min_ratio,
@@ -7616,8 +7711,8 @@ class ContentRouter(Transform):
                     # Two-tier compression cache → shared helper
                     compressed_content, _was_compressed = self._compress_block_content(
                         content=text_content,
-                        content_key=hash(
-                            (text_content, getattr(self, "_runtime_target_ratio", None))
+                        content_key=content_cache_key(
+                            text_content, getattr(self, "_runtime_target_ratio", None)
                         ),
                         context=context,
                         bias=1.0,
@@ -7649,7 +7744,7 @@ class ContentRouter(Transform):
     def _compress_block_content(
         self,
         content: str,
-        content_key: int,
+        content_key: str,
         context: str,
         bias: float,
         min_ratio: float,
@@ -7670,7 +7765,7 @@ class ContentRouter(Transform):
 
         Args:
             content: The string content to compress.
-            content_key: Pre-computed ``hash(content)`` for cache lookups.
+            content_key: Pre-computed :func:`content_cache_key` for cache lookups.
             context: User/query context for relevance-aware compression.
             bias: Compression bias multiplier (tool-specific or 1.0).
             min_ratio: Adaptive minimum compression ratio threshold.
