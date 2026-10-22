@@ -51,14 +51,11 @@ jobs:
           wc -l requirements-prod.txt
 
       - name: Audit dependencies (pip-audit)
-        uses: pypa/gh-action-pip-audit@v1.1.0
-        with:
-          inputs: requirements-prod.txt
-          # The export is uv.lock's fully pinned set, overrides applied; pip
-          # must audit it as is, not re-resolve it (fastembed's pillow<13 cap
-          # would make that fail; see [tool.uv] override-dependencies).
-          no-deps: true
-          disable-pip: true
+        # The export is uv.lock's fully pinned set, overrides applied: audit it
+        # as is. pip must not re-resolve it (fastembed's pillow<13 cap would
+        # fail; see [tool.uv] override-dependencies), and the pip-audit action
+        # has no --disable-pip input, so pip-audit runs directly.
+        run: uvx pip-audit==2.10.1 -r requirements-prod.txt --no-deps --disable-pip
 
   # ---- SCA: Rust dependency advisories -----------------------------------
   # `cargo audit` reads Cargo.lock only (no build, about a minute), so it runs
