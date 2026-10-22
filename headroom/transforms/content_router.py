@@ -1681,7 +1681,8 @@ class CompressionCache:
         self._max_bytes = max_bytes if max_bytes is not None else _compression_cache_budget_bytes()
         self._max_skip = max(1000, self._max_bytes // (1024 * 1024) * _SKIP_ENTRIES_PER_MB)
         self._store = store
-        self._namespace = namespace
+        # A namespace of its own, so clear() never reaches other caches' rows.
+        self._namespace = namespace or ("cache:" if store is not None else "")
         # Bumped by clear(), so a disk read racing it is not admitted after it.
         self._generation = 0
         # Callbacks invoked (outside the lock) whenever ``clear()`` runs, so
@@ -1701,6 +1702,9 @@ class CompressionCache:
         self._total_lookup_ns = 0
         self._lookup_count = 0
         self._lock = threading.Lock()
+        # Orders put()'s disk writes, so an older result cannot overwrite or
+        # delete the disk row of a newer one for the same key.
+        self._disk_lock = threading.Lock()
 
     def get(self, key: str) -> tuple[str, float, str] | None:
         """Get cached compression result.  Thread-safe.
@@ -1769,7 +1773,13 @@ class CompressionCache:
         """Store a compressed result (Tier 2).  Thread-safe."""
         with self._lock:
             has_marker = self._admit_locked(key, compressed, ratio, strategy)
-        if self._store is not None:
+        if self._store is None:
+            return
+        with self._disk_lock:
+            with self._lock:
+                current = self._results.get(key)
+            if current is not None and current[0] != compressed:
+                return  # a later put() replaced it; its disk write wins
             if has_marker:
                 # Never kept on disk; nor may an earlier marker-free result for
                 # this key come back from there once this one leaves memory.

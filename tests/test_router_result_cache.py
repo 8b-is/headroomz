@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import subprocess
 import sys
+import threading
 
 from headroom.cache.result_store import ResultStore, open_result_store
 from headroom.transforms.content_router import (
@@ -77,8 +78,8 @@ def test_a_result_in_use_is_kept_and_an_idle_one_is_dropped(tmp_path, monkeypatc
         clock[0] += 60
         assert cache.get("live") is not None
     assert cache.get("idle") is None
-    assert store.get("idle") is None
-    assert store.get("live") == ("kept", 0.5, "kompress")
+    assert store.get(cache._namespace + "idle") is None
+    assert store.get(cache._namespace + "live") == ("kept", 0.5, "kompress")
 
 
 def test_routers_configured_differently_never_share_output(tmp_path, monkeypatch):
@@ -124,7 +125,7 @@ def test_a_result_pointing_at_a_ccr_original_is_not_kept_on_disk(tmp_path):
     store = ResultStore(tmp_path / "c.db", 1800)
     cache = CompressionCache(store=store)
     cache.put("k", "first lines <<ccr:0123456789abcdef>>", 0.2, "x")
-    assert store.get("k") is None
+    assert store.get(cache._namespace + "k") is None
 
 
 def test_a_nonfinite_budget_falls_back_instead_of_stopping_startup(monkeypatch):
@@ -162,3 +163,37 @@ def test_clear_also_clears_the_routers_rows_on_disk(tmp_path):
     cache.clear()
     assert cache.get("k") is None
     assert store.get("ns2:k") == ("theirs", 0.5, "kompress")
+
+
+def test_an_older_put_never_undoes_a_newer_ones_disk_row(tmp_path):
+    # A marker put admitted first but reaching the disk after a newer plain
+    # put must not delete the plain result's row.
+    store = ResultStore(tmp_path / "c.db", 1800)
+    cache = CompressionCache(store=store)
+
+    class NewerPutRunsFirst:
+        def __init__(self) -> None:
+            self._lock, self._pending = threading.Lock(), True
+
+        def __enter__(self):
+            if self._pending:  # between the marker's admit and its disk step
+                self._pending = False
+                cache.put("k", "plain output", 0.5, "text")
+            self._lock.acquire()
+
+        def __exit__(self, *exc):
+            self._lock.release()
+
+    cache._disk_lock = NewerPutRunsFirst()
+    cache.put("k", "<<ccr:0123456789abcdef 3_rows_offloaded>>", 0.5, "text")
+    assert store.get(cache._namespace + "k")[0] == "plain output"
+
+
+def test_a_cache_without_a_namespace_clears_only_its_own_rows(tmp_path):
+    store = ResultStore(tmp_path / "c.db", 1800)
+    mine = CompressionCache(store=store)
+    other = CompressionCache(store=store, namespace="router-b:")
+    mine.put("a", "result a", 0.5, "text")
+    other.put("b", "result b", 0.5, "text")
+    mine.clear()
+    assert store.get("router-b:b") is not None
