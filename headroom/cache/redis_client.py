@@ -72,9 +72,11 @@ def connect(url: str, *, setting: str) -> Any:
 
 
 class Guard:
-    """Runs Redis calls for one feature: an error is a miss, logged when it
-    starts and when Redis is back; after a connection error Redis is skipped
-    for :data:`BACKOFF_SECONDS`."""
+    """Runs Redis calls for one feature: an error is a miss, logged when that
+    kind of call (``what``: read, write, ...) starts failing and when it works
+    again; after a connection error Redis is skipped for :data:`BACKOFF_SECONDS`.
+    Tracking each kind apart keeps a Redis that serves reads but refuses writes
+    (``maxmemory`` with ``noeviction``) from logging on every request."""
 
     def __init__(self, feature: str) -> None:
         import redis
@@ -84,7 +86,7 @@ class Guard:
         self._connection_errors = (redis.ConnectionError, redis.TimeoutError)
         self._lock = threading.Lock()
         self._skip_until = 0.0
-        self._failing = False
+        self._failing: set[str] = set()
 
     def call(self, what: str, fn: Callable[[], T], default: T) -> T:
         if time.monotonic() < self._skip_until:
@@ -95,8 +97,8 @@ class Guard:
             with self._lock:
                 if isinstance(exc, self._connection_errors):
                     self._skip_until = time.monotonic() + BACKOFF_SECONDS
-                if not self._failing:
-                    self._failing = True
+                if what not in self._failing:
+                    self._failing.add(what)
                     logger.warning(
                         "%s: Redis %s failed (%s: %s); carrying on without shared state",
                         self._feature,
@@ -105,9 +107,9 @@ class Guard:
                         exc,
                     )
             return default
-        if self._failing:
+        if what in self._failing:
             with self._lock:
-                if self._failing:
-                    self._failing = False
-                    logger.info("%s: Redis is reachable again", self._feature)
+                if what in self._failing:
+                    self._failing.discard(what)
+                    logger.info("%s: Redis %s works again", self._feature, what)
         return result

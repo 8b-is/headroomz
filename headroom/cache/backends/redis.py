@@ -88,7 +88,7 @@ class RedisBackend:
         def scan() -> list[str]:
             return [
                 k.decode() if isinstance(k, bytes) else k
-                for k in self._client.scan_iter(match=self._prefix + "*", count=500)
+                for k in self._client.scan_iter(match=_glob_escape(self._prefix) + "*", count=500)
             ]
 
         return self._guard.call("scan", scan, [])
@@ -101,6 +101,14 @@ def _decode(raw: Any) -> CompressionEntry | None:
     try:
         data = json.loads(raw)
         known = {f.name for f in fields(CompressionEntry)}
-        return CompressionEntry(**{k: v for k, v in data.items() if k in known})
+        entry = CompressionEntry(**{k: v for k, v in data.items() if k in known})
     except (ValueError, TypeError, AttributeError):
         return None
+    texts_ok = isinstance(entry.original_content, str) and isinstance(entry.compressed_content, str)
+    times_ok = isinstance(entry.created_at, (int, float)) and isinstance(entry.ttl, int)
+    return entry if texts_ok and times_ok else None
+
+
+def _glob_escape(text: str) -> str:
+    """``text`` matched literally in a SCAN pattern."""
+    return "".join("\\" + c if c in "*?[]\\" else c for c in text)

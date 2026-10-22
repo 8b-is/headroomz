@@ -452,6 +452,8 @@ class CompressionStore:
                 self._mark_heap_entries_stale()
 
             self._backend.set(hash_key, entry)
+            if self._backend_expires_entries:
+                return hash_key  # no local index: Redis expires it
             # MEDIUM FIX #16: Add to eviction heap for O(log n) eviction
             heapq.heappush(self._eviction_heap, (entry.created_at, hash_key))
             heapq.heappush(
@@ -713,7 +715,10 @@ class CompressionStore:
                 entry_count=self._backend.count(),
                 size_bytes=bytes_used,
                 budget_bytes=None,  # No budget set yet
-                hits=sum(1 for _, e in self._backend.items() if e.retrieval_count > 0),
+                # A shared store would be read whole to count these.
+                hits=0
+                if self._backend_expires_entries
+                else sum(1 for _, e in self._backend.items() if e.retrieval_count > 0),
                 misses=0,  # CompressionStore doesn't track misses directly
                 evictions=0,  # Would need to track this separately
             )
@@ -874,6 +879,8 @@ class CompressionStore:
 
     def _mark_heap_entries_stale(self) -> None:
         """Record lazy tuples invalidated by deleting or replacing an entry."""
+        if self._backend_expires_entries:
+            return  # no index kept for a self-expiring backend
         self._stale_heap_entries += 1
         self._stale_expiration_heap_entries += 1
 
@@ -898,6 +905,8 @@ class CompressionStore:
 
     def _rebuild_heap_if_needed(self) -> None:
         """Rebuild both indexes when either stale ratio reaches the threshold."""
+        if self._backend_expires_entries:
+            return  # rebuilding would scan the shared store
         heap_size = len(self._eviction_heap)
         expiration_heap_size = len(self._expiration_heap)
         stale_ratio = self._stale_heap_entries / heap_size if heap_size else 0
@@ -1206,7 +1215,14 @@ def _create_default_ccr_backend() -> CompressionStoreBackend | None:
             # registered as "redis" still wins, above.
             from .backends.redis import RedisBackend
 
-            return RedisBackend(os.environ.get("HEADROOM_REDIS_URL", "").strip())
+            url = os.environ.get("HEADROOM_REDIS_URL", "").strip()
+            if not url:
+                logger.error(
+                    "HEADROOM_CCR_BACKEND=redis needs HEADROOM_REDIS_URL; using the "
+                    "in-process store, so a marker resolves only on the replica that made it"
+                )
+                return None
+            return RedisBackend(url)
         if ep is None:
             logger.warning(
                 "HEADROOM_CCR_BACKEND=%s but no entry point headroom.ccr_backend[%s]",

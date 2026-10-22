@@ -99,4 +99,31 @@ def test_storing_never_scans_the_shared_keyspace(server, monkeypatch):
     store._max_entries = 2
     monkeypatch.setattr(RedisBackend, "_scan", lambda self: pytest.fail("scanned"))
     hashes = [store.store(f"original {i} " * 40, f"short {i}") for i in range(5)]
+    # Re-stores (a marker met again every turn) and retrievals neither.
+    for _ in range(300):
+        store.store("original 0 " * 40, "short 0")
     assert all(store.retrieve(h) is not None for h in hashes)
+    assert not store._eviction_heap and not store._expiration_heap  # nothing grows
+
+
+def test_a_redis_that_reads_but_refuses_writes_logs_once(caplog):
+    import redis
+
+    class Full(fakeredis.FakeRedis):
+        def set(self, *args, **kwargs):
+            raise redis.ResponseError("OOM command not allowed")
+
+    store = CompressionStore(backend=RedisBackend("redis://localhost", client=Full()))
+    with caplog.at_level("INFO", logger="headroom.cache.redis_client"):
+        for i in range(5):
+            store.store(f"original {i} " * 40, "short")
+            store.retrieve("abc123def456")
+    messages = [r.getMessage() for r in caplog.records]
+    assert sum("failed" in m for m in messages) == 1
+    assert not any("works again" in m for m in messages)
+
+
+def test_a_prefix_with_glob_characters_matches_only_itself(server, monkeypatch):
+    _replica(server).store("ours " * 40, "short")
+    monkeypatch.setenv("HEADROOM_REDIS_KEY_PREFIX", "head*")
+    assert RedisBackend("redis://localhost", client=fakeredis.FakeRedis(server=server)).count() == 0
