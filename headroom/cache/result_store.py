@@ -107,6 +107,10 @@ class ResultStore:
     def delete(self, key: str) -> None:
         self._run("DELETE FROM results WHERE k = ?", (key,))
 
+    def clear_prefix(self, prefix: str) -> None:
+        """Delete every row whose key starts with ``prefix`` (a router's namespace)."""
+        self._run("DELETE FROM results WHERE substr(k, 1, ?) = ?", (len(prefix), prefix))
+
     def _run(self, sql: str, args: tuple[object, ...]) -> None:
         try:
             with self._lock:

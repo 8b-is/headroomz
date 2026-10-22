@@ -1582,8 +1582,10 @@ def _compression_cache_budget_bytes() -> int:
     try:
         mb = float(raw) if raw else DEFAULT_COMPRESSION_CACHE_MB
     except ValueError:
+        mb = math.nan
+    if not math.isfinite(mb) or mb <= 0:
         logger.warning(
-            "HEADROOM_COMPRESSION_CACHE_MB=%r is not a number; using %d MB",
+            "HEADROOM_COMPRESSION_CACHE_MB=%r is not a positive number of MB; using %d",
             raw,
             DEFAULT_COMPRESSION_CACHE_MB,
         )
@@ -1621,8 +1623,13 @@ def _config_namespace(config: Any) -> str:
             return [stable(v) for v in value]
         return value
 
+    # The router also reads compressor settings from the environment (e.g.
+    # HEADROOM_LOSSLESS_THEN_LOSSY) into instance state outside its config;
+    # every HEADROOM_* setting is part of the digest, so changing any of them
+    # starts a fresh namespace rather than serving output made under another.
+    settings = sorted((k, v) for k, v in os.environ.items() if k.startswith("HEADROOM_"))
     h = hashlib.blake2b(digest_size=8)
-    h.update(f"{__version__}|{stable(asdict(config))!r}".encode())
+    h.update(f"{__version__}|{stable(asdict(config))!r}|{settings!r}".encode())
     return h.hexdigest() + ":"
 
 
@@ -1762,8 +1769,13 @@ class CompressionCache:
         """Store a compressed result (Tier 2).  Thread-safe."""
         with self._lock:
             has_marker = self._admit_locked(key, compressed, ratio, strategy)
-        if self._store is not None and not has_marker:
-            self._store.put(self._namespace + key, compressed, ratio, strategy)
+        if self._store is not None:
+            if has_marker:
+                # Never kept on disk; nor may an earlier marker-free result for
+                # this key come back from there once this one leaves memory.
+                self._store.delete(self._namespace + key)
+            else:
+                self._store.put(self._namespace + key, compressed, ratio, strategy)
 
     def mark_skip(self, key: str) -> None:
         """Mark content as non-compressible (Tier 1).  Thread-safe."""
@@ -1846,13 +1858,15 @@ class CompressionCache:
         self._on_clear.append(callback)
 
     def clear(self) -> None:
-        """Clear this process's entries.  Thread-safe.  The disk tier is shared
-        with other workers and routers and is left alone; its rows expire."""
+        """Clear all entries, including this router's rows on disk (other
+        workers with the same config share them).  Thread-safe."""
         with self._lock:
             self._results.clear()
             self._bytes = 0
             self._skip.clear()
             self._generation += 1
+        if self._store is not None:
+            self._store.clear_prefix(self._namespace)
         # Fire callbacks outside the lock to avoid cross-lock ordering issues.
         for callback in self._on_clear:
             callback()

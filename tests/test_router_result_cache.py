@@ -125,3 +125,40 @@ def test_a_result_pointing_at_a_ccr_original_is_not_kept_on_disk(tmp_path):
     cache = CompressionCache(store=store)
     cache.put("k", "first lines <<ccr:0123456789abcdef>>", 0.2, "x")
     assert store.get("k") is None
+
+
+def test_a_nonfinite_budget_falls_back_instead_of_stopping_startup(monkeypatch):
+    for raw in ("nan", "inf", "-5"):
+        monkeypatch.setenv("HEADROOM_COMPRESSION_CACHE_MB", raw)
+        assert CompressionCache().stats["cache_max_bytes"] == 64 * 1024 * 1024
+
+
+def test_a_changed_compressor_setting_does_not_reuse_old_results(tmp_path, monkeypatch):
+    # Settings the router reads from the environment, outside its config.
+    monkeypatch.setenv("HEADROOM_COMPRESSION_CACHE_PATH", str(tmp_path / "c.db"))
+    before = ContentRouter(ContentRouterConfig(result_cache_disk=True))
+    before._cache.put("k", "made under the old setting", 0.3, "kompress")
+    monkeypatch.setenv("HEADROOM_LOSSLESS_THEN_LOSSY", "1")
+    after = ContentRouter(ContentRouterConfig(result_cache_disk=True))
+    assert after._cache.get("k") is None
+
+
+def test_a_marker_result_replacing_a_plain_one_removes_it_from_disk(tmp_path):
+    store = ResultStore(tmp_path / "c.db", 1800)
+    cache = CompressionCache(max_bytes=4_000, store=store)
+    cache.put("k", "plain result", 0.5, "kompress")
+    cache.put("k", "first lines <<ccr:0123456789abcdef>>", 0.2, "x")
+    for i in range(10):  # push "k" out of memory
+        cache.put(f"filler{i}", "f" * 1000, 0.5, "kompress")
+    assert cache.get("k") is None
+
+
+def test_clear_also_clears_the_routers_rows_on_disk(tmp_path):
+    store = ResultStore(tmp_path / "c.db", 1800)
+    cache = CompressionCache(store=store, namespace="ns1:")
+    other = CompressionCache(store=store, namespace="ns2:")
+    cache.put("k", "value", 0.5, "kompress")
+    other.put("k", "theirs", 0.5, "kompress")
+    cache.clear()
+    assert cache.get("k") is None
+    assert store.get("ns2:k") == ("theirs", 0.5, "kompress")
