@@ -51,7 +51,7 @@ from concurrent.futures import ThreadPoolExecutor
 from contextvars import ContextVar, copy_context
 from dataclasses import dataclass, field, replace
 from enum import Enum
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from ..config import (
     DEFAULT_BYTE_EXACT_EXCLUDE_TOOLS,
@@ -97,6 +97,9 @@ from .lossless_provider import (
 )
 from .mixed_content import ContentSection, mixed_content_indicators
 from .relevance_split import build_relevance_query, plan_relevance_split, segment
+
+if TYPE_CHECKING:
+    from ..cache.result_store import ResultStore
 
 logger = logging.getLogger(__name__)
 
@@ -1564,6 +1567,12 @@ def _netcost_message_tokens(message: dict[str, Any], tokenizer: Tokenizer) -> in
 DEFAULT_COMPRESSION_CACHE_MB = 64
 #: Bytes a cache entry costs beyond its text (key, tuple, dict slot).
 _CACHE_ENTRY_OVERHEAD = 256
+#: How long a compression result is kept after it was last used. Results are
+#: mostly one session's tool output, and nothing signals a session's end; a
+#: session idle past the provider's longest prompt-cache TTL (Anthropic: 1 h)
+#: has no cached prefix left to protect, so compressing it again on resume
+#: costs only the compression.
+RESULT_TTL_SECONDS = 75 * 60
 #: Skip-tier entries kept per MB of budget (each is a key and a timestamp).
 _SKIP_ENTRIES_PER_MB = 2000
 
@@ -1593,8 +1602,32 @@ def content_cache_key(content: str, target_ratio: float | None, gated: bool = Fa
     return h.hexdigest()
 
 
+def _config_namespace(config: Any) -> str:
+    """A prefix for this router's keys in the shared disk tier: a digest of its
+    config and the headroom version. The proxy may run routers configured
+    differently (per-provider Kompress overrides), and a restart may change
+    settings; neither may serve output the other made."""
+    from dataclasses import asdict
+
+    from .. import __version__
+
+    def stable(value: Any) -> Any:
+        # Sets repr in hash-seed order, which differs per process.
+        if isinstance(value, (set, frozenset)):
+            return sorted(map(stable, value), key=repr)
+        if isinstance(value, dict):
+            return sorted((repr(k), stable(v)) for k, v in value.items())
+        if isinstance(value, (list, tuple)):
+            return [stable(v) for v in value]
+        return value
+
+    h = hashlib.blake2b(digest_size=8)
+    h.update(f"{__version__}|{stable(asdict(config))!r}".encode())
+    return h.hexdigest() + ":"
+
+
 class CompressionCache:
-    """Two-tier compression cache with TTL and a memory budget.  Thread-safe.
+    """Two-tier compression cache with idle expiry and a memory budget.  Thread-safe.
 
     Tier 1 (skip set): content keys that won't compress — instant skip.
 
@@ -1602,11 +1635,15 @@ class CompressionCache:
     reuse the compressed text on subsequent requests.
 
     Memory is bounded: results are kept in least-recently-used order within
-    ``max_bytes`` (``HEADROOM_COMPRESSION_CACHE_MB``, default 64), the skip set
-    within a matching entry count, and entries expire after ``ttl_seconds``.
+    ``max_bytes`` (``HEADROOM_COMPRESSION_CACHE_MB``, default 64; results only),
+    the skip set within a matching entry count. A result expires ``ttl_seconds``
+    after it was last used (a session idle that long has no cached prefix to
+    protect). A result carrying a CCR marker expires ``marker_ttl_seconds`` after
+    it was made instead, with the CCR original it points to.
+
     With a ``store`` (the proxy's :class:`~headroom.cache.result_store.ResultStore`),
-    every result is also written to disk and an entry the budget evicted is
-    read back from there instead of compressed again.
+    marker-free results are also written to disk under ``namespace`` and an
+    entry the budget evicted is read back from there instead of compressed again.
 
     Thread safety: a ``threading.Lock`` guards all read-modify-write
     operations.  The ``apply()`` path runs compression inside a
@@ -1617,25 +1654,37 @@ class CompressionCache:
 
     def __init__(
         self,
-        ttl_seconds: int = 1800,
+        ttl_seconds: int = RESULT_TTL_SECONDS,
         max_bytes: int | None = None,
-        store: Any = None,
+        store: ResultStore | None = None,
+        namespace: str = "",
+        marker_ttl_seconds: int | None = None,
     ):
         import threading
 
-        # Tier 2: {key: (text, ratio, strategy, created_at)}, least recently used first.
-        self._results: OrderedDict[str, tuple[str, float, str, float]] = OrderedDict()
+        from ..cache.compression_store import _get_env_default_ttl_seconds
+
+        # Tier 2: {key: (text, ratio, strategy, stamp, disk_touched, has_marker)},
+        # least recently used first. ``stamp`` is the last use, or the creation
+        # time for a result with a CCR marker.
+        self._results: OrderedDict[str, tuple[str, float, str, float, float, bool]] = OrderedDict()
         self._bytes = 0
         # Tier 1: {key: marked_at}, oldest first.
         self._skip: OrderedDict[str, float] = OrderedDict()
         self._max_bytes = max_bytes if max_bytes is not None else _compression_cache_budget_bytes()
         self._max_skip = max(1000, self._max_bytes // (1024 * 1024) * _SKIP_ENTRIES_PER_MB)
         self._store = store
+        self._namespace = namespace
+        # Bumped by clear(), so a disk read racing it is not admitted after it.
+        self._generation = 0
         # Callbacks invoked (outside the lock) whenever ``clear()`` runs, so
         # sibling state keyed by the same content keys (e.g. the router's
         # frozen-verdict store) can be reset in lock-step with the cache.
         self._on_clear: list[Any] = []
         self._ttl_seconds = ttl_seconds
+        self._marker_ttl_seconds = (
+            marker_ttl_seconds if marker_ttl_seconds is not None else _get_env_default_ttl_seconds()
+        )
         # Metrics
         self._hits = 0
         self._disk_hits = 0
@@ -1653,23 +1702,46 @@ class CompressionCache:
         Use is_skipped() first to check if content is known non-compressible.
         """
         t0 = time.perf_counter_ns()
+        touch_disk = False
         with self._lock:
             entry = self._results.get(key)
             if entry is not None:
-                compressed, ratio, strategy, created_at = entry
-                if (time.monotonic() - created_at) < self._ttl_seconds:
+                compressed, ratio, strategy, stamp, disk_touched, has_marker = entry
+                now = time.monotonic()
+                ttl = self._marker_ttl_seconds if has_marker else self._ttl_seconds
+                if (now - stamp) < ttl:
+                    if not has_marker:
+                        # A hit keeps the entry for another ttl: expiry counts
+                        # idle time. The disk copy too, at most every half ttl,
+                        # so the budget evicting it later cannot lose it mid-session.
+                        touch_disk = self._store is not None and (now - disk_touched >= ttl / 2)
+                        self._results[key] = (
+                            compressed,
+                            ratio,
+                            strategy,
+                            now,
+                            now if touch_disk else disk_touched,
+                            False,
+                        )
                     self._results.move_to_end(key)
                     self._hits += 1
                     self._record_lookup(t0)
-                    return (compressed, ratio, strategy)
-                self._drop_locked(key)
-                self._evictions += 1
-        found = self._store.get(key) if self._store is not None else None
+                    hit: tuple[str, float, str] | None = (compressed, ratio, strategy)
+                else:
+                    self._drop_locked(key)
+                    self._evictions += 1
+                    hit = None
+                if hit is not None:
+                    if touch_disk and self._store is not None:
+                        self._store.touch(self._namespace + key)
+                    return hit
+            generation = self._generation
+        found = self._store.get(self._namespace + key) if self._store is not None else None
         with self._lock:
-            if found is not None:
+            if found is not None and generation == self._generation:
                 self._admit_locked(key, *found)
                 self._disk_hits += 1
-            else:
+            elif found is None:
                 self._misses += 1
             self._record_lookup(t0)
         return found
@@ -1689,9 +1761,9 @@ class CompressionCache:
     def put(self, key: str, compressed: str, ratio: float, strategy: str) -> None:
         """Store a compressed result (Tier 2).  Thread-safe."""
         with self._lock:
-            self._admit_locked(key, compressed, ratio, strategy)
-        if self._store is not None:
-            self._store.put(key, compressed, ratio, strategy)
+            has_marker = self._admit_locked(key, compressed, ratio, strategy)
+        if self._store is not None and not has_marker:
+            self._store.put(self._namespace + key, compressed, ratio, strategy)
 
     def mark_skip(self, key: str) -> None:
         """Mark content as non-compressible (Tier 1).  Thread-safe."""
@@ -1705,16 +1777,21 @@ class CompressionCache:
             self._drop_locked(key)
             self._skip_locked(key)
         if self._store is not None:
-            self._store.delete(key)
+            self._store.delete(self._namespace + key)
 
-    def _admit_locked(self, key: str, compressed: str, ratio: float, strategy: str) -> None:
+    def _admit_locked(self, key: str, compressed: str, ratio: float, strategy: str) -> bool:
+        """Add a result, evicting least recently used ones over budget; returns
+        whether it carries a CCR marker."""
         self._drop_locked(key)
-        self._results[key] = (compressed, ratio, strategy, time.monotonic())
+        now = time.monotonic()
+        has_marker = CCR_RETRIEVAL_MARKER_RE.search(compressed) is not None
+        self._results[key] = (compressed, ratio, strategy, now, now, has_marker)
         self._bytes += sys.getsizeof(compressed) + _CACHE_ENTRY_OVERHEAD
         # Least recently used first; the entry just added always stays.
         while self._bytes > self._max_bytes and len(self._results) > 1:
             self._drop_locked(next(iter(self._results)))
             self._evictions += 1
+        return has_marker
 
     def _drop_locked(self, key: str) -> None:
         entry = self._results.pop(key, None)
@@ -1769,13 +1846,13 @@ class CompressionCache:
         self._on_clear.append(callback)
 
     def clear(self) -> None:
-        """Clear all entries (e.g., on session end).  Thread-safe."""
+        """Clear this process's entries.  Thread-safe.  The disk tier is shared
+        with other workers and routers and is left alone; its rows expire."""
         with self._lock:
             self._results.clear()
             self._bytes = 0
             self._skip.clear()
-        if self._store is not None:
-            self._store.clear()
+            self._generation += 1
         # Fire callbacks outside the lock to avoid cross-lock ordering issues.
         for callback in self._on_clear:
             callback()
@@ -2547,8 +2624,8 @@ class ContentRouter(Transform):
         if self.config.result_cache_disk:
             from ..cache.result_store import open_result_store
 
-            store = open_result_store(ttl_seconds=1800)
-        self._cache = CompressionCache(store=store)
+            store = open_result_store(ttl_seconds=RESULT_TTL_SECONDS)
+        self._cache = CompressionCache(store=store, namespace=_config_namespace(self.config))
 
         # Cache-churn fix (HEADROOM_FREEZE_BLOCK_DECISION, default off):
         # freeze each block's compress-vs-passthrough verdict on first
