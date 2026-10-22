@@ -10,9 +10,11 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
-import pytest
+try:
+    import tomllib
+except ModuleNotFoundError:  # Python 3.10
+    import tomli as tomllib  # type: ignore[no-redef]
 
-tomllib = pytest.importorskip("tomllib")
 ROOT = Path(__file__).resolve().parents[1]
 
 
