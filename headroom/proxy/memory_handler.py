@@ -759,9 +759,12 @@ class MemoryHandler:
         if not self.config.inject_context:
             return None
 
+        from headroom.proxy.helpers import get_memory_injection_mode
+
         # PR-B6: Tool mode disables auto-injection. The model calls
-        # ``memory_search`` to retrieve when it wants to.
-        if self.config.mode == MemoryMode.TOOL:
+        # ``memory_search`` to retrieve when it wants to. Selected by the
+        # handler config or by HEADROOM_MEMORY_INJECTION_MODE=tool.
+        if self.config.mode == MemoryMode.TOOL or get_memory_injection_mode() == "tool":
             logger.info(
                 "event=memory_mode_skip mode=tool user_id=%s reason=tool_mode_no_auto_injection",
                 user_id,

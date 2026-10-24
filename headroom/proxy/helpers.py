@@ -250,6 +250,9 @@ def capture_codex_wire_debug(
 #     prefix) is never mutated.
 #   - "disabled": Memory context lookup is skipped entirely; the request
 #     forwards untouched.
+#   - "tool": Auto-injection of context is off, but the memory tools are still
+#     registered; the agent calls them explicitly (``search_and_format_context``
+#     returns None in this mode).
 #
 # Configurable via HEADROOM_MEMORY_INJECTION_MODE env var. There is no
 # "system_prompt" option — that path is permanently retired by I2 (cache hot
