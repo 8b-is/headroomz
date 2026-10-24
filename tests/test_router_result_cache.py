@@ -254,65 +254,97 @@ def test_a_disk_read_during_clear_never_restores_a_cleared_result(tmp_path):
     assert cache.get("k") is None
 
 
+class PauseAfterFetch:
+    """Stands in for a cache's ``_disk_read_lock``: the first ``pauses`` reads
+    stop after their fetch, outside the lock and before admission."""
+
+    def __init__(self, pauses: int) -> None:
+        self._lock = threading.Lock()
+        self.fetched = [threading.Event() for _ in range(pauses)]
+        self.release = [threading.Event() for _ in range(pauses)]
+        self._exits = 0
+
+    def __enter__(self):
+        self._lock.acquire()
+
+    def __exit__(self, *exc):
+        i, self._exits = self._exits, self._exits + 1
+        self._lock.release()
+        if i < len(self.fetched):
+            self.fetched[i].set()
+            assert self.release[i].wait(5)
+
+
 def test_concurrent_disk_reads_of_one_key_each_return_the_result(tmp_path):
     store = ResultStore(tmp_path / "c.db", 1800)
     cache = CompressionCache(max_bytes=600, store=store)
     cache.put("k", "kept", 0.5, "text")
     cache.put("other", "z" * 300, 0.5, "text")  # evicts k from memory
-    read_done = [threading.Event(), threading.Event()]
-    release = [threading.Event(), threading.Event()]
-    calls = []
-    real_get = store.get
-
-    def paused_get(key):
-        found = real_get(key)
-        i = len(calls)
-        calls.append(i)
-        read_done[i].set()
-        assert release[i].wait(5)
-        return found
-
-    store.get = paused_get
+    reads = cache._disk_read_lock = PauseAfterFetch(2)
     results: dict[str, object] = {}
     first = threading.Thread(target=lambda: results.update(first=cache.get("k")))
     second = threading.Thread(target=lambda: results.update(second=cache.get("k")))
     first.start()
-    assert read_done[0].wait(5)
+    assert reads.fetched[0].wait(5)
     second.start()
-    assert read_done[1].wait(5)  # both reads in flight; the first finishes first
-    release[0].set()
+    assert reads.fetched[1].wait(5)  # both reads in flight; the first finishes first
+    reads.release[0].set()
     first.join(5)
-    release[1].set()
+    reads.release[1].set()
     second.join(5)
     assert results == {"first": ("kept", 0.5, "text"), "second": ("kept", 0.5, "text")}
 
 
 def test_an_older_disk_read_never_replaces_a_later_reads_result(tmp_path):
-    # Two workers share one store: a read that started earlier holds an older
-    # row than one that started after the other worker's put.
+    # Two workers share one store: a read that fetched earlier holds an older
+    # row than one that fetched after the other worker's put.
     store = ResultStore(tmp_path / "c.db", 1800)
     cache = CompressionCache(max_bytes=600, store=store)
     other_worker = CompressionCache(store=store)
     cache.put("k", "old", 0.5, "text")
     cache.put("other", "z" * 300, 0.5, "text")  # evicts k from memory
-    read_done, release = threading.Event(), threading.Event()
-    real_get = store.get
-
-    def paused_get(key):
-        found = real_get(key)
-        store.get = real_get  # pause only the first read
-        read_done.set()
-        assert release.wait(5)
-        return found
-
-    store.get = paused_get
+    reads = cache._disk_read_lock = PauseAfterFetch(1)
     results = []
     reader = threading.Thread(target=lambda: results.append(cache.get("k")))
     reader.start()
-    assert read_done.wait(5)  # the first read has "old" in hand
+    assert reads.fetched[0].wait(5)  # the first read has "old" in hand
     other_worker.put("k", "new", 0.5, "text")
     assert cache.get("k") == ("new", 0.5, "text")  # a later read admits "new"
-    release.set()
+    reads.release[0].set()
     reader.join(5)
     assert results == [("new", 0.5, "text")]
     assert cache.get("k") == ("new", 0.5, "text")
+
+
+def test_a_read_that_fetches_later_is_never_outranked_by_an_older_row(tmp_path):
+    # Read A is numbered before read B but fetches after another worker's
+    # put: what A fetched is the newest row and must be what memory keeps.
+    store = ResultStore(tmp_path / "c.db", 1800)
+    cache = CompressionCache(max_bytes=600, store=store)
+    other_worker = CompressionCache(store=store)
+    cache.put("k", "old", 0.5, "text")
+    cache.put("other", "z" * 300, 0.5, "text")  # evicts k from memory
+    fetching, release = threading.Event(), threading.Event()
+    real_get = store.get
+
+    def paused_get(key):
+        store.get = real_get  # pause only the first read, before it fetches
+        fetching.set()
+        assert release.wait(5)
+        return real_get(key)
+
+    store.get = paused_get
+    results = []
+    first = threading.Thread(target=lambda: results.append(cache.get("k")))
+    first.start()
+    assert fetching.wait(5)  # A is numbered; its fetch has not run
+    second = threading.Thread(target=cache.get, args=("k",))
+    second.start()
+    second.join(0.5)  # B reads "old" here unless A's read holds it off
+    other_worker.put("k", "new", 0.5, "text")
+    release.set()
+    first.join(5)
+    second.join(5)
+    assert results == [("new", 0.5, "text")]
+    assert cache.get("k") == ("new", 0.5, "text")
+    assert store.get(cache._namespace + "k")[0] == "new"

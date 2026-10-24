@@ -1710,6 +1710,10 @@ class CompressionCache:
         # Orders put()'s disk writes, so an older result cannot overwrite or
         # delete the disk row of a newer one for the same key.
         self._disk_lock = threading.Lock()
+        # Serializes get()'s disk reads (only memory misses read the disk), so
+        # a read numbered later also fetched later and saw a row at least as
+        # new. Order: _disk_read_lock, then _lock, then the store's lock.
+        self._disk_read_lock = threading.Lock()
 
     def get(self, key: str) -> tuple[str, float, str] | None:
         """Get cached compression result.  Thread-safe.
@@ -1755,10 +1759,17 @@ class CompressionCache:
                 self._misses += 1
                 self._record_lookup(t0)
                 return None
-            self._read_seq += 1
-            seq = self._read_seq
-            self._disk_reads.setdefault(key, set()).add(seq)
-        found = self._store.get(self._namespace + key)
+        with self._disk_read_lock:
+            with self._lock:
+                entry = self._results.get(key)
+                if entry is not None:  # a put() or another read admitted it meanwhile
+                    self._hits += 1
+                    self._record_lookup(t0)
+                    return entry[:3]
+                self._read_seq += 1
+                seq = self._read_seq
+                self._disk_reads.setdefault(key, set()).add(seq)
+            found = self._store.get(self._namespace + key)
         with self._lock:
             readers = self._disk_reads.get(key)
             if readers is not None and seq in readers:
