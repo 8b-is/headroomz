@@ -89,10 +89,7 @@ async def test_real_sdk_puts_service_tier_on_the_provider_request(
                 if wire_format == "anthropic":
                     assert all(event.event_type != "error" for event in events)
                     assert events[-1].event_type == "message_stop"
-                    assert any(
-                        event.data.get("delta", {}).get("text") == "ok"
-                        for event in events
-                    )
+                    assert any(event.data.get("delta", {}).get("text") == "ok" for event in events)
                 else:
                     chunks = [
                         json.loads(event.removeprefix("data: ").strip())
