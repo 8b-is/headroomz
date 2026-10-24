@@ -201,9 +201,10 @@ jobs:
         with:
           node-version: ">=24.16.0 <25"
       # A directory may hold npm-audit-exceptions.json for advisories in copies
-      # bundled inside a package, which overrides cannot replace. Only the
-      # listed advisory at the listed paths is accepted, until `expires`; any
-      # other finding fails, and so does an entry that no longer matches.
+      # bundled inside a package, which overrides cannot replace. A listed
+      # advisory is accepted only at its listed path, only while the lock has
+      # that exact version there as a bundled copy, and only until `expires`.
+      # Any other finding fails, and so does an entry that no longer matches.
       - name: Audit locked dependencies at every severity
         working-directory: ${{ matrix.directory }}
         run: |
@@ -221,18 +222,27 @@ jobs:
           exceptions = json.load(open("npm-audit-exceptions.json"))
           if datetime.date.today().isoformat() > exceptions["expires"]:
               sys.exit(f"npm-audit-exceptions.json expired on {exceptions['expires']}: recheck upstream.")
-          allowed = exceptions["advisories"]
+          allowed = exceptions["advisories"]  # {advisory: {lock path: bundled version}}
+          locked = json.load(open("package-lock.json"))["packages"]
+          vulns = json.load(open(sys.argv[1])).get("vulnerabilities", {})
           seen, unexpected = set(), []
-          for name, vuln in json.load(open(sys.argv[1])).get("vulnerabilities", {}).items():
+          for name, vuln in vulns.items():
               for via in vuln["via"]:
                   if isinstance(via, str):
-                      continue  # inherited from `via`, which is checked on its own entry
+                      # Inherited: its advisories are checked on that package's
+                      # own entry, which therefore has to be in the report.
+                      if via not in vulns:
+                          unexpected.append(f"{name} via {via} (no entry for {via})")
+                      continue
                   advisory = via["url"].rsplit("/", 1)[-1]
                   for node in vuln["nodes"]:
-                      if node in allowed.get(advisory, []):
+                      entry = locked.get(node, {})
+                      pinned = allowed.get(advisory, {}).get(node)
+                      if pinned and entry.get("version") == pinned and entry.get("inBundle"):
                           seen.add((advisory, node))
                       else:
-                          unexpected.append(f"{advisory} {node} ({via['severity']})")
+                          found = f"{entry.get('version')}{' bundled' if entry.get('inBundle') else ''}"
+                          unexpected.append(f"{advisory} {node} {found} ({via['severity']})")
           stale = [f"{a} {n}" for a, nodes in allowed.items() for n in nodes if (a, n) not in seen]
           for line in unexpected:
               print("NOT EXCEPTED:", line)

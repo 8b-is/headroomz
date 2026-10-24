@@ -2,9 +2,20 @@
   "expires": "2026-11-15",
   "reason": "Copies bundled inside packages, which npm overrides cannot replace. openclaw (every release through 2026.10.10-beta.3) bundles undici 8.11.2; npm 12.2.1 (the latest npm, a dependency of openclaw) bundles undici 6.29.0 and ip-address 10.7.2. This tree only installs the CLIs the wrap E2E tests drive in CI; it never ships. Remove each entry once openclaw or npm releases a bundle with the fix.",
   "advisories": {
-    "GHSA-4qv8-2p9j-2685": ["node_modules/npm/node_modules/undici", "node_modules/openclaw/node_modules/undici"],
-    "GHSA-f72v-6w45-q472": ["node_modules/npm/node_modules/undici", "node_modules/openclaw/node_modules/undici"],
-    "GHSA-xjj6-f33q-929c": ["node_modules/npm/node_modules/undici", "node_modules/openclaw/node_modules/undici"],
-    "GHSA-rxp7-6hxx-x8q5": ["node_modules/npm/node_modules/ip-address"]
+    "GHSA-4qv8-2p9j-2685": {
+      "node_modules/npm/node_modules/undici": "6.29.0",
+      "node_modules/openclaw/node_modules/undici": "8.11.2"
+    },
+    "GHSA-f72v-6w45-q472": {
+      "node_modules/npm/node_modules/undici": "6.29.0",
+      "node_modules/openclaw/node_modules/undici": "8.11.2"
+    },
+    "GHSA-xjj6-f33q-929c": {
+      "node_modules/npm/node_modules/undici": "6.29.0",
+      "node_modules/openclaw/node_modules/undici": "8.11.2"
+    },
+    "GHSA-rxp7-6hxx-x8q5": {
+      "node_modules/npm/node_modules/ip-address": "10.7.2"
+    }
   }
 }
