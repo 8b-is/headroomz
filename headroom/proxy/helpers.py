@@ -4107,9 +4107,21 @@ def _warn_deferred_without_search_tool(tools: Any) -> None:
     )
 
 
+#: Non-Anthropic upstreams that accept the first-party deferred tool shape.
+#: These bill deferred schemas compactly, so downgrading deferral for them
+#: inlines the whole catalog and multiplies billed prompt tokens.
+_DEFERRAL_CAPABLE_HOSTS: frozenset[str] = frozenset({"api.githubcopilot.com"})
+
+
 def anthropic_first_party_tool_search_supported(api_base_url: str | None) -> bool:
     """Return whether Anthropic server-side tool search is valid for this upstream."""
-    from headroom.providers.claude.runtime import is_custom_anthropic_base_url
+    from headroom.providers.claude.runtime import (
+        _gate_view_host,
+        is_custom_anthropic_base_url,
+    )
+
+    if _gate_view_host((api_base_url or "").strip()) in _DEFERRAL_CAPABLE_HOSTS:
+        return True
 
     return not is_custom_anthropic_base_url(api_base_url)
 
