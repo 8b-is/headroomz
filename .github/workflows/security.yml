@@ -200,9 +200,48 @@ jobs:
       - uses: actions/setup-node@v7
         with:
           node-version: ">=24.16.0 <25"
+      # A directory may hold npm-audit-exceptions.json for advisories in copies
+      # bundled inside a package, which overrides cannot replace. Only the
+      # listed advisory at the listed paths is accepted, until `expires`; any
+      # other finding fails, and so does an entry that no longer matches.
       - name: Audit locked dependencies at every severity
         working-directory: ${{ matrix.directory }}
-        run: npm audit --package-lock-only --audit-level=low
+        run: |
+          if [ ! -f npm-audit-exceptions.json ]; then
+            npm audit --package-lock-only --audit-level=low
+            exit
+          fi
+          npm audit --package-lock-only --audit-level=low || true
+          npm audit --package-lock-only --json > "$RUNNER_TEMP/audit.json" || true
+          python3 - "$RUNNER_TEMP/audit.json" <<'PY'
+          import datetime
+          import json
+          import sys
+
+          exceptions = json.load(open("npm-audit-exceptions.json"))
+          if datetime.date.today().isoformat() > exceptions["expires"]:
+              sys.exit(f"npm-audit-exceptions.json expired on {exceptions['expires']}: recheck upstream.")
+          allowed = exceptions["advisories"]
+          seen, unexpected = set(), []
+          for name, vuln in json.load(open(sys.argv[1])).get("vulnerabilities", {}).items():
+              for via in vuln["via"]:
+                  if isinstance(via, str):
+                      continue  # inherited from `via`, which is checked on its own entry
+                  advisory = via["url"].rsplit("/", 1)[-1]
+                  for node in vuln["nodes"]:
+                      if node in allowed.get(advisory, []):
+                          seen.add((advisory, node))
+                      else:
+                          unexpected.append(f"{advisory} {node} ({via['severity']})")
+          stale = [f"{a} {n}" for a, nodes in allowed.items() for n in nodes if (a, n) not in seen]
+          for line in unexpected:
+              print("NOT EXCEPTED:", line)
+          for line in stale:
+              print("STALE EXCEPTION (fixed? remove it):", line)
+          if unexpected or stale:
+              sys.exit(1)
+          print(f"Only excepted bundled advisories remain ({len(seen)}), until {exceptions['expires']}.")
+          PY
 
   # ---- SAST: CodeQL static analysis ------------------------------------
   codeql:
