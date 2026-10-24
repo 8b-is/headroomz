@@ -57,6 +57,100 @@ jobs:
         # has no --disable-pip input, so pip-audit runs directly.
         run: uvx pip-audit==2.10.1 -r requirements-prod.txt --no-deps --disable-pip
 
+  # ---- SCA: what `pip install headroom-ai[all]` gets ---------------------
+  # The job above audits uv.lock, which the release image also installs
+  # (overrides applied). pip ignores [tool.uv] and resolves the package
+  # metadata, where fastembed caps pillow <13: audit that set too. Its Pillow
+  # advisories fixed in 13 are accepted only because headroom/image/
+  # decoder_guard.py never decodes an image on Pillow <13, which the guard step
+  # proves on that same Pillow first. Any other finding fails the job.
+  # `uv pip compile` stands in for pip's resolver on Linux/Python 3.12, so it
+  # approximates, not reproduces, every user's install; on Python 3.10 pip
+  # also gets Pillow 12 (guarded) and filelock <4.2.1 (no fixed release there).
+  # It resolves live from PyPI, so a new upstream advisory would fail PRs that
+  # did not cause it: on pull requests it runs only when pyproject.toml changes;
+  # pushes to main and the weekly schedule always run it.
+  published-install-audit:
+    name: Dependency audit (pip install from package metadata)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Run on this event?
+        id: gate
+        run: |
+          if [ "${{ github.event_name }}" != "pull_request" ] || \
+             git diff --name-only "${{ github.event.pull_request.base.sha }}" HEAD | grep -qx pyproject.toml; then
+            echo "run=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "pyproject.toml unchanged in this PR; main and the weekly run cover it."
+          fi
+
+      - name: Set up Python
+        if: steps.gate.outputs.run == 'true'
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+
+      - name: Install uv
+        if: steps.gate.outputs.run == 'true'
+        uses: astral-sh/setup-uv@v10.3.0
+
+      - name: Resolve what pip installs from the package metadata
+        if: steps.gate.outputs.run == 'true'
+        run: |
+          uv --no-config pip compile pyproject.toml --extra all --python-version 3.12 \
+            --no-header --no-annotate -o published.txt
+          uv --no-config pip compile pyproject.toml --python-version 3.12 \
+            --no-header --no-annotate -o core.txt
+          grep -iE '^(pillow|fastembed)==' published.txt
+
+      - name: The decoder guard holds on that Pillow
+        if: steps.gate.outputs.run == 'true'
+        run: |
+          uv venv -p 3.12 .published
+          uv --no-config pip install -p .published -r core.txt \
+            "$(grep -i '^pillow==' published.txt)" pytest pytest-asyncio
+          .published/bin/python -m pytest -p no:cacheprovider tests/test_image_decoder_guard.py
+          PINNED="$(grep -i '^pillow==' published.txt | cut -d= -f3)" .published/bin/python - <<'PY'
+          import os
+
+          import PIL
+          from headroom.image.decoder_guard import FIXED_PILLOW_MAJOR, pillow_is_safe
+
+          # The guard reads the Pillow that is imported; it must be pip's pick.
+          assert PIL.__version__ == os.environ["PINNED"], (PIL.__version__, os.environ["PINNED"])
+          fixed = int(PIL.__version__.split(".")[0]) >= FIXED_PILLOW_MAJOR
+          assert pillow_is_safe() is fixed, (PIL.__version__, pillow_is_safe())
+          print("Pillow", PIL.__version__, "decodes images:", fixed)
+          PY
+
+      - name: Audit it (pip-audit)
+        if: steps.gate.outputs.run == 'true'
+        run: |
+          uvx pip-audit==2.10.1 -r published.txt --no-deps --disable-pip \
+            --format json -o audit.json || true
+          python - <<'PY'
+          import json
+
+          deps = json.load(open("audit.json"))["dependencies"]
+          findings = [(d["name"], d["version"], v) for d in deps for v in d.get("vulns", [])]
+          guarded = [
+              f for f in findings
+              # The guard turns off all decoding below Pillow 13, whatever the fix.
+              if f[0].lower() == "pillow" and int(f[1].split(".")[0]) < 13
+          ]
+          for name, ver, v in findings:
+              note = "  (guarded: decoder_guard)" if (name, ver, v) in guarded else ""
+              print(f"{name} {ver} {v['id']} fix {v['fix_versions']}{note}")
+          assert len(deps) > 50, "pip-audit produced no dependency list"
+          if len(findings) > len(guarded):
+              raise SystemExit("Unguarded advisories in the pip-installed set; see above.")
+          PY
+
   # ---- SCA: Rust dependency advisories -----------------------------------
   # `cargo audit` reads Cargo.lock only (no build, about a minute), so it runs
   # unconditionally: every PR, every push to main, and the weekly schedule

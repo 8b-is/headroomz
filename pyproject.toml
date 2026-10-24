@@ -78,6 +78,13 @@ dependencies = [
     # and pip upgrades an older copy. Same platform marker as huggingface-hub's
     # own hf-xet requirement, so it never installs where hf-xet would not.
     "hf-xet>=1.6.0; platform_machine == 'AMD64' or platform_machine == 'aarch64' or platform_machine == 'amd64' or platform_machine == 'arm64' or platform_machine == 'x86_64'",
+    # Not imported directly: litellm, huggingface-hub and torch use it.
+    # CVE-2026-112907/112913/112940 are fixed in 4.2.1, but litellm 1.106 caps
+    # filelock <4, so without this floor pip picks that litellm and 3.32.7;
+    # with it pip takes litellm 1.103.7 (uv.lock has 1.101.0). Declared here so
+    # the floor reaches pip installs. 4.2 needs Python 3.11, so pip on 3.10
+    # still gets an affected filelock.
+    "filelock>=4.2.1; python_version >= '3.11'",
 ]
 
 [project.optional-dependencies]
@@ -425,12 +432,13 @@ constraint-dependencies = [
 # Declaring the index in pyproject.toml makes the project authoritative
 # regardless of who runs `uv lock`.
 # fastembed (0.9.0, latest) caps pillow <13, but Pillow 13.0.0 is the only fix
-# for CVE-2026-112390..112401 (decoder bugs on untrusted images, which
-# headroom.image opens). fastembed imports PIL only for its image models;
+# for ten decoder CVEs on untrusted images (CVE-2026-112395, -112895 and
+# others), which headroom.image opens. fastembed imports PIL only for its image models;
 # Headroom uses its text models. Checked: fastembed text embedding and
 # Headroom's image tests pass on Pillow 13. This applies to uv.lock (CI,
 # release images, uv installs); the package metadata keeps pillow>=12.3.0 so
-# `pip install headroom-ai[all]` still resolves against fastembed's cap.
+# `pip install headroom-ai[all]` still resolves against fastembed's cap; on
+# that Pillow, headroom/image/decoder_guard.py forwards images undecoded.
 # Drop this override once fastembed allows Pillow 13.
 # Pillow 13 needs Python 3.11; on 3.10 no fixed release exists.
 override-dependencies = [
