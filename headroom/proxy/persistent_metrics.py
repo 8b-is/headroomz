@@ -83,6 +83,15 @@ def _coerce_float(value: Any) -> float:
     return result if math.isfinite(result) and result >= 0 else 0.0
 
 
+def _coerce_signed_float(value: Any) -> float:
+    """_coerce_float without the zero floor, for compression savings that can lose."""
+    try:
+        result = float(value)
+    except (TypeError, ValueError, OverflowError):
+        return 0.0
+    return result if math.isfinite(result) else 0.0
+
+
 def _label(value: Any) -> str:
     if not isinstance(value, str):
         return "other"
@@ -257,7 +266,10 @@ class PersistentMetricsState:
             "compression_savings_list_usd",
             "cache_savings_usd",
         ):
-            result["cost"][key] = round(_coerce_float(raw_cost.get(key)), 6)
+            coerce = (
+                _coerce_signed_float if key.startswith("compression_savings") else _coerce_float
+            )
+            result["cost"][key] = round(coerce(raw_cost.get(key)), 6)
         # A state written before cache-aware pricing has no list column and its
         # dollars WERE list-priced, so that one figure seeds both and the
         # aggregate stays honestly labelled.
@@ -266,7 +278,7 @@ class PersistentMetricsState:
         # column, and labelling that "list" would tell every new install its
         # untouched $0.00 total was list-priced. Only a state that actually
         # accumulated dollars has history to migrate.
-        has_priced_history = result["cost"]["compression_savings_usd"] > 0
+        has_priced_history = result["cost"]["compression_savings_usd"] != 0
         if "compression_savings_list_usd" in raw_cost:
             result["cost"]["savings_basis"] = str(raw_cost.get("savings_basis") or "unknown")
         elif has_priced_history:
@@ -466,7 +478,7 @@ class PersistentMetricsState:
         cost = self._state["cost"]
         cost["input_usd"] = round(cost["input_usd"] + _coerce_float(input_usd), 6)
         cost["compression_savings_usd"] = round(
-            cost["compression_savings_usd"] + _coerce_float(compression_savings_usd), 6
+            cost["compression_savings_usd"] + _coerce_signed_float(compression_savings_usd), 6
         )
         # Defaults to the cache-aware figure when a caller supplies no ceiling,
         # which is the truthful reading of "these are the same number" for a
@@ -477,7 +489,9 @@ class PersistentMetricsState:
             else compression_savings_list_usd
         )
         cost["compression_savings_list_usd"] = round(
-            _coerce_float(cost.get("compression_savings_list_usd")) + _coerce_float(list_delta), 6
+            _coerce_signed_float(cost.get("compression_savings_list_usd"))
+            + _coerce_signed_float(list_delta),
+            6,
         )
         if savings_basis:
             cost["savings_basis"] = _blend_savings_basis(cost.get("savings_basis"), savings_basis)
