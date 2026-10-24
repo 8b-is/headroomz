@@ -26,7 +26,11 @@ from typing import Any
 from headroom import paths as _paths
 from headroom.log_safety import WarnOnce, describe_exception, safe_id
 from headroom.proxy import project_name_policy
-from headroom.proxy.persistent_metrics import PersistentMetricsState
+from headroom.proxy.persistent_metrics import (
+    MAX_LABEL_LENGTH,
+    PersistentMetricsState,
+    bounded_model_key,
+)
 
 PROJECT_NAME_MAX_LENGTH = project_name_policy.PROJECT_NAME_MAX_LENGTH
 sanitize_project_name = project_name_policy.sanitize_project_name
@@ -1097,7 +1101,7 @@ class SavingsTracker:
                     "timestamp": _to_utc_iso(timestamp_dt),
                     "provider": _normalize_provider(provider),
                     "agent": _normalize_agent(agent),
-                    "model": _normalize_model(model),
+                    "model": _normalize_model(model)[:MAX_LABEL_LENGTH],
                     "total_tokens_saved": lifetime["tokens_saved"],
                     "compression_savings_usd": lifetime["compression_savings_usd"],
                     "total_input_tokens": lifetime["total_input_tokens"],
@@ -1401,7 +1405,7 @@ class SavingsTracker:
                         "timestamp": _to_utc_iso(timestamp_dt),
                         "provider": _normalize_provider(provider),
                         "agent": _normalize_agent(agent),
-                        "model": _normalize_model(model),
+                        "model": _normalize_model(model)[:MAX_LABEL_LENGTH],
                         "total_tokens_saved": lifetime["tokens_saved"],
                         "compression_savings_usd": lifetime["compression_savings_usd"],
                         "cache_read_tokens": lifetime["cache_read_tokens"],
@@ -1578,7 +1582,7 @@ class SavingsTracker:
         without migration.
         """
         by_model: dict[str, dict[str, Any]] = self._state.setdefault("by_model", {})
-        key = _normalize_model(model)
+        key = bounded_model_key(_normalize_model(model), by_model)
         entry = by_model.setdefault(key, _empty_by_model_entry())
         entry["requests"] += max(requests_delta, 0)
         entry["tokens_saved"] += max(tokens_saved_delta, 0)
