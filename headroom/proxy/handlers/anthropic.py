@@ -121,7 +121,7 @@ def _thinking_tokens_for(payload: object) -> ThinkingTokens:
 
     Anthropic reports no thinking count in ``usage``, so the count is derived
     from the response's own thinking blocks and marked inferred. Without the
-    split, reasoning-effort routing and verbosity steering move the same
+    split, thinking-budget changes and verbosity steering move the same
     counter and neither can be attributed.
 
     Never raises: token accounting is bookkeeping, and a failure here must
@@ -3648,8 +3648,7 @@ class AnthropicHandlerMixin:
                 logger.debug("consistency token re-count skipped", exc_info=True)
 
             # Output shaping (opt-in via HEADROOM_OUTPUT_SHAPER): verbosity
-            # steering appended to the system-prompt tail + effort routing on
-            # mechanical tool_result continuations. Runs after every other
+            # steering appended to the system-prompt tail. Runs after every other
             # body mutation so the turn classifier sees the final messages,
             # and respects the same bypass header as compression.
             if not _bypass:

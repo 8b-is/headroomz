@@ -861,7 +861,7 @@ def _shape_openai_responses_payload(
     The Responses counterpart of the Anthropic handler's shaping block:
     conversation-stable holdout assignment, stratum labelling for the
     output-savings ledger, then verbosity steering on the ``instructions``
-    tail and ``reasoning.effort`` routing on mechanical continuations.
+    tail.
 
     Returns ``(labels, mutated)``. ``labels`` are carried on the transforms
     channel for both arms (the control arm's stratum label is what feeds the
