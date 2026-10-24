@@ -225,3 +225,63 @@ def test_a_disk_read_in_flight_never_replaces_a_newer_put(tmp_path):
     assert results == [("new", 0.5, "text")]
     assert cache.get("k") == ("new", 0.5, "text")
     assert store.get(cache._namespace + "k")[0] == "new"
+
+
+def test_a_disk_read_during_clear_never_restores_a_cleared_result(tmp_path):
+    store = ResultStore(tmp_path / "c.db", 1800)
+    cache = CompressionCache(max_bytes=600, store=store)
+    cache.put("k", "old", 0.5, "text")
+    cache.put("other", "z" * 300, 0.5, "text")  # evicts k from memory
+    deleting, release = threading.Event(), threading.Event()
+    real_clear_prefix = store.clear_prefix
+
+    def paused_clear_prefix(prefix):
+        deleting.set()
+        assert release.wait(5)
+        real_clear_prefix(prefix)
+
+    store.clear_prefix = paused_clear_prefix
+    clearer = threading.Thread(target=cache.clear)
+    clearer.start()
+    assert deleting.wait(5)  # memory cleared, disk row not yet deleted
+    reader = threading.Thread(target=cache.get, args=("k",))
+    reader.start()
+    reader.join(0.5)  # finishes here unless clear() still holds it off
+    release.set()
+    clearer.join(5)
+    reader.join(5)
+    assert store.get(cache._namespace + "k") is None
+    assert cache.get("k") is None
+
+
+def test_concurrent_disk_reads_of_one_key_each_return_the_result(tmp_path):
+    store = ResultStore(tmp_path / "c.db", 1800)
+    cache = CompressionCache(max_bytes=600, store=store)
+    cache.put("k", "kept", 0.5, "text")
+    cache.put("other", "z" * 300, 0.5, "text")  # evicts k from memory
+    read_done = [threading.Event(), threading.Event()]
+    release = [threading.Event(), threading.Event()]
+    calls = []
+    real_get = store.get
+
+    def paused_get(key):
+        found = real_get(key)
+        i = len(calls)
+        calls.append(i)
+        read_done[i].set()
+        assert release[i].wait(5)
+        return found
+
+    store.get = paused_get
+    results: dict[str, object] = {}
+    first = threading.Thread(target=lambda: results.update(first=cache.get("k")))
+    second = threading.Thread(target=lambda: results.update(second=cache.get("k")))
+    first.start()
+    assert read_done[0].wait(5)
+    second.start()
+    assert read_done[1].wait(5)  # both reads in flight; the first finishes first
+    release[0].set()
+    first.join(5)
+    release[1].set()
+    second.join(5)
+    assert results == {"first": ("kept", 0.5, "text"), "second": ("kept", 0.5, "text")}
