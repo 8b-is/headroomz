@@ -1040,6 +1040,10 @@ class HeadroomProxy(
         # Runs BEFORE the disable_kompress override below so that flag stays
         # authoritative for turning Kompress off.
         _apply_compressor_selection(router_config, config.compressors)
+        # The proxy is long-lived: keep compression results it has no memory
+        # budget for in a SQLite file instead of compressing them again
+        # (headroom.cache.result_store; off in stateless mode).
+        router_config.result_cache_disk = True
         # External (non-built-in) `headroom.compressor` selections are ignored by
         # `_apply_compressor_selection` (they have no enable_* flag). Thread them
         # to the router here so it can route matching blocks through them; None
