@@ -701,6 +701,11 @@ class ImageCompressor:
         Returns:
             Messages with compressed images
         """
+        # Reset first: the per-worker singleton (proxy/image_isolation.py) keeps
+        # one ImageCompressor for every request and reports last_result whenever
+        # it is not None, so a request we return early on below must not inherit
+        # the previous request's technique and token numbers.
+        self.last_result = None
         if not self.has_images(messages) or not pillow_is_safe():
             return messages
 
