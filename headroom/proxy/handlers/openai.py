@@ -4392,23 +4392,27 @@ class OpenAIHandlerMixin:
                     apply_session_sticky_memory_tools as _apply_sticky_mem_tools,
                 )
 
-                memory_tool_defs = (
-                    self.memory_handler.compute_memory_tool_definitions("openai")
-                    if self.memory_handler.config.inject_tools
-                    else []
-                )
-                tools, mem_tools_injected = _apply_sticky_mem_tools(
-                    provider="openai",
-                    session_id=openai_session_id,
-                    request_id=request_id,
-                    existing_tools=tools,
-                    memory_tools_to_inject=memory_tool_defs,
-                    inject_this_turn=bool(self.memory_handler.config.inject_tools),
-                    client_declared_tools=bool(_original_tools),
-                )
-                if mem_tools_injected:
-                    memory_tools_injected = True
-                    logger.info(f"[{request_id}] Memory: Injected memory tools (openai)")
+                # Only the Anthropic stream path executes memory tool calls
+                # (streaming.py `memory_enabled`). Skip the whole call on a
+                # streamed turn: the sticky replay would re-add golden tools.
+                if not stream:
+                    memory_tool_defs = (
+                        self.memory_handler.compute_memory_tool_definitions("openai")
+                        if self.memory_handler.config.inject_tools
+                        else []
+                    )
+                    tools, mem_tools_injected = _apply_sticky_mem_tools(
+                        provider="openai",
+                        session_id=openai_session_id,
+                        request_id=request_id,
+                        existing_tools=tools,
+                        memory_tools_to_inject=memory_tool_defs,
+                        inject_this_turn=bool(self.memory_handler.config.inject_tools),
+                        client_declared_tools=bool(_original_tools),
+                    )
+                    if mem_tools_injected:
+                        memory_tools_injected = True
+                        logger.info(f"[{request_id}] Memory: Injected memory tools (openai)")
             except Exception as e:
                 logger.warning(f"[{request_id}] Memory injection failed: {e}")
 
@@ -6019,7 +6023,10 @@ class OpenAIHandlerMixin:
         ) or _client_can_receive_memory_tools(memory_client)
         if _ensure_chatgpt_responses_store_false(body, is_chatgpt_auth=is_chatgpt_auth):
             logger.info(f"[{request_id}] Responses: forced store=false for ChatGPT auth")
-        responses_memory_tools_allowed = _allow_responses_memory_tools(is_chatgpt_auth)
+        # Streamed Responses turns do not execute memory tool calls; keep tools off.
+        responses_memory_tools_allowed = (
+            _allow_responses_memory_tools(is_chatgpt_auth) and not stream
+        )
 
         # PR-A6 (P5-50, preps P0-6): session-sticky `OpenAI-Beta` merge
         # for /v1/responses. Compute a session_id off the same store the
