@@ -873,7 +873,9 @@ class CostTracker:
         # the reporting history, while this deque evicts entries as soon as the
         # configured hourly/daily/monthly window advances. Each entry is added
         # and removed once, making expiry amortized O(1) instead of rescanning
-        # up to MAX_COST_ENTRIES before every request (#3367).
+        # up to MAX_COST_ENTRIES before every request (#3367). It is bounded by
+        # the period, not by MAX_COST_ENTRIES: evicting an in-period entry would
+        # drop spend that still counts against the budget (#4416).
         self._budget_costs: deque[CostEntry] = deque()
         self._budget_measured_usd = 0.0
         self._budget_estimated_usd = 0.0
@@ -1266,8 +1268,6 @@ class CostTracker:
     def _record_budget_cost(self, entry: CostEntry) -> None:
         """Add one entry to the current-period aggregate in amortized O(1)."""
         self._refresh_budget_window(entry.timestamp)
-        if len(self._budget_costs) >= self.MAX_COST_ENTRIES:
-            self._subtract_budget_cost(self._budget_costs.popleft())
         self._budget_costs.append(entry)
         if entry.basis == COST_BASIS_ESTIMATED:
             self._budget_estimated_usd += entry.cost_usd
