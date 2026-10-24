@@ -4989,6 +4989,11 @@ class AnthropicHandlerMixin:
                                     url=url,
                                     request_id=request_id,
                                 )
+                                if not 200 <= continuation_response.status_code < 300:
+                                    raise RuntimeError(
+                                        "turn hook re-drive returned non-success status "
+                                        f"{continuation_response.status_code}"
+                                    )
                                 continuation_json = continuation_response.json()
                                 _hook_usage.record(continuation_json)
                                 return continuation_json
