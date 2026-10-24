@@ -176,7 +176,7 @@ _PROFILES: dict[str, AgentSavingsProfile] = {
         # protect_reads misses code the agent fetches (curl, an MCP tool) and
         # reads Codex sends without their command, and code_aware cuts the
         # function bodies the agent came to read. CCR stays ON (unset) so any
-        # lossy loss is recoverable. Effort router off; low block floor so modest
+        # lossy loss is recoverable. Low block floor so modest
         # deltas are eligible.
         tool_search=True,
         cross_turn_dedup=True,
