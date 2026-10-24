@@ -285,3 +285,34 @@ def test_concurrent_disk_reads_of_one_key_each_return_the_result(tmp_path):
     release[1].set()
     second.join(5)
     assert results == {"first": ("kept", 0.5, "text"), "second": ("kept", 0.5, "text")}
+
+
+def test_an_older_disk_read_never_replaces_a_later_reads_result(tmp_path):
+    # Two workers share one store: a read that started earlier holds an older
+    # row than one that started after the other worker's put.
+    store = ResultStore(tmp_path / "c.db", 1800)
+    cache = CompressionCache(max_bytes=600, store=store)
+    other_worker = CompressionCache(store=store)
+    cache.put("k", "old", 0.5, "text")
+    cache.put("other", "z" * 300, 0.5, "text")  # evicts k from memory
+    read_done, release = threading.Event(), threading.Event()
+    real_get = store.get
+
+    def paused_get(key):
+        found = real_get(key)
+        store.get = real_get  # pause only the first read
+        read_done.set()
+        assert release.wait(5)
+        return found
+
+    store.get = paused_get
+    results = []
+    reader = threading.Thread(target=lambda: results.append(cache.get("k")))
+    reader.start()
+    assert read_done.wait(5)  # the first read has "old" in hand
+    other_worker.put("k", "new", 0.5, "text")
+    assert cache.get("k") == ("new", 0.5, "text")  # a later read admits "new"
+    release.set()
+    reader.join(5)
+    assert results == [("new", 0.5, "text")]
+    assert cache.get("k") == ("new", 0.5, "text")

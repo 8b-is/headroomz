@@ -1683,10 +1683,13 @@ class CompressionCache:
         self._store = store
         # A namespace of its own, so clear() never reaches other caches' rows.
         self._namespace = namespace or ("cache:" if store is not None else "")
-        # {key: one token per get() reading it from disk}. put(),
+        # {key: sequence numbers of the get()s reading it from disk}. put(),
         # move_to_skip() and clear() drop the key, so a read that raced one of
-        # them is not admitted over the newer state.
-        self._disk_reads: dict[str, set[object]] = {}
+        # them is not admitted over the newer state; an admitted read drops
+        # the earlier ones, which may hold an older row (another worker can
+        # write the shared store between them).
+        self._disk_reads: dict[str, set[int]] = {}
+        self._read_seq = 0
         # Callbacks invoked (outside the lock) whenever ``clear()`` runs, so
         # sibling state keyed by the same content keys (e.g. the router's
         # frozen-verdict store) can be reset in lock-step with the cache.
@@ -1752,21 +1755,24 @@ class CompressionCache:
                 self._misses += 1
                 self._record_lookup(t0)
                 return None
-            token = object()
-            self._disk_reads.setdefault(key, set()).add(token)
+            self._read_seq += 1
+            seq = self._read_seq
+            self._disk_reads.setdefault(key, set()).add(seq)
         found = self._store.get(self._namespace + key)
         with self._lock:
             readers = self._disk_reads.get(key)
-            if readers is not None and token in readers:
-                readers.discard(token)
-                if not readers:
+            if readers is not None and seq in readers:
+                later = {s for s in readers if s > seq}
+                if later:
+                    self._disk_reads[key] = later
+                else:
                     del self._disk_reads[key]
                 if found is not None:
                     self._admit_locked(key, *found)
                     self._disk_hits += 1
             else:
-                # A write for this key landed during the read; the newest
-                # result is the one in memory, if any.
+                # A write for this key, or a later read's admission, landed
+                # during the read; the newest result is the one in memory, if any.
                 newer = self._results.get(key)
                 found = None if newer is None else newer[:3]
             if found is None:
