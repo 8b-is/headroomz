@@ -348,3 +348,35 @@ def test_a_read_that_fetches_later_is_never_outranked_by_an_older_row(tmp_path):
     assert results == [("new", 0.5, "text")]
     assert cache.get("k") == ("new", 0.5, "text")
     assert store.get(cache._namespace + "k")[0] == "new"
+
+
+def test_a_result_that_expires_while_a_read_waits_is_not_returned(tmp_path, monkeypatch):
+    # get() misses memory, then waits for the disk-read lock; a marker result
+    # admitted meanwhile expires before the wait ends. Its second look at
+    # memory must apply the same lifetime as the first, not return it.
+    import time as time_module
+
+    clock = [1000.0]
+    monkeypatch.setattr(time_module, "monotonic", lambda: clock[0])
+    cache = CompressionCache(store=ResultStore(tmp_path / "c.db", 1800), marker_ttl_seconds=1)
+    waiting, real = threading.Event(), cache._disk_read_lock
+
+    class SignalsWait:
+        def __enter__(self):
+            waiting.set()
+            return real.__enter__()
+
+        def __exit__(self, *exc):
+            return real.__exit__(*exc)
+
+    cache._disk_read_lock = SignalsWait()
+    results = []
+    with real:
+        reader = threading.Thread(target=lambda: results.append(cache.get("k")))
+        reader.start()
+        assert waiting.wait(5)
+        cache.put("k", "head <<ccr:0123456789abcdef>>", 0.2, "x")
+        clock[0] += 2
+    reader.join(5)
+    assert results == [None]
+    assert cache.get("k") is None

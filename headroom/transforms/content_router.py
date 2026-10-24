@@ -1722,50 +1722,20 @@ class CompressionCache:
         Use is_skipped() first to check if content is known non-compressible.
         """
         t0 = time.perf_counter_ns()
-        touch_disk = False
         with self._lock:
-            entry = self._results.get(key)
-            if entry is not None:
-                compressed, ratio, strategy, stamp, disk_touched, has_marker = entry
-                now = time.monotonic()
-                ttl = self._marker_ttl_seconds if has_marker else self._ttl_seconds
-                if (now - stamp) < ttl:
-                    if not has_marker:
-                        # A hit keeps the entry for another ttl: expiry counts
-                        # idle time. The disk copy too, at most every half ttl,
-                        # so the budget evicting it later cannot lose it mid-session.
-                        touch_disk = self._store is not None and (now - disk_touched >= ttl / 2)
-                        self._results[key] = (
-                            compressed,
-                            ratio,
-                            strategy,
-                            now,
-                            now if touch_disk else disk_touched,
-                            False,
-                        )
-                    self._results.move_to_end(key)
-                    self._hits += 1
-                    self._record_lookup(t0)
-                    hit: tuple[str, float, str] | None = (compressed, ratio, strategy)
-                else:
-                    self._drop_locked(key)
-                    self._evictions += 1
-                    hit = None
-                if hit is not None:
-                    if touch_disk and self._store is not None:
-                        self._store.touch(self._namespace + key)
-                    return hit
+            hit = self._memory_hit_locked(key, t0)
+            if hit is not None:
+                return hit
             if self._store is None:
                 self._misses += 1
                 self._record_lookup(t0)
                 return None
         with self._disk_read_lock:
             with self._lock:
-                entry = self._results.get(key)
-                if entry is not None:  # a put() or another read admitted it meanwhile
-                    self._hits += 1
-                    self._record_lookup(t0)
-                    return entry[:3]
+                # A put() or another read may have admitted it meanwhile.
+                hit = self._memory_hit_locked(key, t0)
+                if hit is not None:
+                    return hit
                 self._read_seq += 1
                 seq = self._read_seq
                 self._disk_reads.setdefault(key, set()).add(seq)
@@ -1784,12 +1754,50 @@ class CompressionCache:
             else:
                 # A write for this key, or a later read's admission, landed
                 # during the read; the newest result is the one in memory, if any.
-                newer = self._results.get(key)
-                found = None if newer is None else newer[:3]
+                found = self._memory_hit_locked(key, t0)
+                if found is not None:
+                    return found
             if found is None:
                 self._misses += 1
             self._record_lookup(t0)
         return found
+
+    def _memory_hit_locked(self, key: str, t0: int) -> tuple[str, float, str] | None:
+        """Serve ``key`` from memory if present and unexpired; drop it if expired.
+
+        Every memory read in get() goes through here, so each applies the same
+        lifetime contract (marker TTL, idle refresh, disk touch). Caller holds _lock.
+        """
+        entry = self._results.get(key)
+        if entry is None:
+            return None
+        compressed, ratio, strategy, stamp, disk_touched, has_marker = entry
+        now = time.monotonic()
+        ttl = self._marker_ttl_seconds if has_marker else self._ttl_seconds
+        if (now - stamp) >= ttl:
+            self._drop_locked(key)
+            self._evictions += 1
+            return None
+        touch_disk = False
+        if not has_marker:
+            # A hit keeps the entry for another ttl: expiry counts idle time.
+            # The disk copy too, at most every half ttl, so the budget evicting
+            # it later cannot lose it mid-session.
+            touch_disk = self._store is not None and (now - disk_touched >= ttl / 2)
+            self._results[key] = (
+                compressed,
+                ratio,
+                strategy,
+                now,
+                now if touch_disk else disk_touched,
+                False,
+            )
+        self._results.move_to_end(key)
+        self._hits += 1
+        self._record_lookup(t0)
+        if touch_disk and self._store is not None:
+            self._store.touch(self._namespace + key)
+        return (compressed, ratio, strategy)
 
     def is_skipped(self, key: str) -> bool:
         """Check if content is known non-compressible (Tier 1).  Thread-safe."""
