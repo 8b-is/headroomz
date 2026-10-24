@@ -461,16 +461,31 @@ class HeadroomMCPServer:
 
         # Store original in local store for later retrieval
         store = self._get_local_store()
-        hash_key = store.store(
-            original=content,
-            compressed=compressed_content
-            if isinstance(compressed_content, str)
-            else json.dumps(compressed_content),
-            original_tokens=input_tokens,
-            compressed_tokens=output_tokens,
-            compression_strategy="mcp_compress",
-            ttl=MCP_SESSION_TTL,
-        )
+        try:
+            hash_key = store.store(
+                original=content,
+                compressed=compressed_content
+                if isinstance(compressed_content, str)
+                else json.dumps(compressed_content),
+                original_tokens=input_tokens,
+                compressed_tokens=output_tokens,
+                compression_strategy="mcp_compress",
+                ttl=MCP_SESSION_TTL,
+            )
+        except StorageError as e:
+            # No stored original: hand back the content itself, which also
+            # keeps out any marker the pipeline put in the compressed text.
+            logger.warning("headroom_compress: returning the original, CCR store refused it: %s", e)
+            return {
+                "compressed": content,
+                "hash": None,
+                "original_tokens": input_tokens,
+                "compressed_tokens": input_tokens,
+                "tokens_saved": 0,
+                "savings_percent": 0,
+                "transforms": [],
+                "note": "Not compressed: the CCR store could not keep the original.",
+            }
 
         # Track stats
         strategy = (

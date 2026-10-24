@@ -209,6 +209,9 @@ def flaky_store(server, monkeypatch):
     monkeypatch.setattr(redis_client, "BACKOFF_SECONDS", 0.0)  # recovery is immediate
     client = _Flaky(server=server)
     store = CompressionStore(backend=RedisBackend("redis://localhost", client=client))
+    # Global too: executor threads (the MCP tools) and startup do not see the
+    # request-scoped store.
+    monkeypatch.setattr(compression_store, "_compression_store", store)
     compression_store.set_request_compression_store(store)
     yield store, client
     compression_store.clear_request_compression_store()
@@ -323,7 +326,8 @@ def test_mcp_read_returns_the_file_and_caches_no_hash_while_redis_is_down(flaky_
     mcp_server = import_module_with_mcp_stub("headroom.ccr.mcp_server")
     store, client = flaky_store
     path = tmp_path / "a.py"
-    path.write_text("x = 1\n" * 50, encoding="utf-8")
+    source = "x = 1\n" * 50
+    path.write_bytes(source.encode())  # exact bytes: write_text would emit CRLF on Windows
     server = mcp_server.HeadroomMCPServer(check_proxy=False)
     client.outage = "down"
     response = asyncio.run(server._handle_read({"file_path": str(path)}))
@@ -332,7 +336,66 @@ def test_mcp_read_returns_the_file_and_caches_no_hash_while_redis_is_down(flaky_
     client.outage = None
     asyncio.run(server._handle_read({"file_path": str(path)}))
     (_, ccr_hash, _, _) = next(iter(server._file_cache.values()))
-    assert store.retrieve(ccr_hash).original_content == path.read_text(encoding="utf-8")
+    assert store.retrieve(ccr_hash).original_content == source
+
+
+@pytest.mark.parametrize("outage", ["oom", "down"])
+def test_mcp_compress_returns_the_original_while_redis_fails_then_resumes(flaky_store, outage):
+    import asyncio
+
+    from tests._mcp_stub import import_module_with_mcp_stub
+
+    mcp_server = import_module_with_mcp_stub("headroom.ccr.mcp_server")
+    store, client = flaky_store
+    content = json.dumps([{"id": i, "status": "ok", "tag": "alpha"} for i in range(60)])
+    server = mcp_server.HeadroomMCPServer(check_proxy=False)
+
+    def compress() -> dict:
+        response = asyncio.run(server._handle_compress({"content": content}))
+        return json.loads(response[0].kwargs["text"])
+
+    client.outage = outage
+    failed = compress()
+    assert (failed["compressed"], failed["hash"], failed["tokens_saved"]) == (content, None, 0)
+
+    client.outage = None
+    resumed = compress()
+    assert resumed["compressed"] != content
+    assert store.retrieve(resumed["hash"]).original_content == content
+
+
+@pytest.mark.parametrize("outage", ["oom", "down"])
+def test_proxy_starts_when_redis_fails_restoring_prefix_state(
+    server, flaky_store, outage, monkeypatch, tmp_path
+):
+    pytest.importorskip("fastapi")
+    import contextvars
+
+    from fastapi.testclient import TestClient
+
+    from headroom.cache.prefix_tracker import PREFIX_STATE_FILE_ENV, SessionTrackerStore
+    from headroom.proxy.server import ProxyConfig, create_app
+    from tests.test_anthropic_fork_lineage_cache import _send
+
+    store, client = flaky_store
+    hash_key = store.store(json.dumps(list(range(400))), "[0, 1]", ttl=900)
+    saved = SessionTrackerStore()
+    text = f"[400 items compressed to 2. Retrieve more: hash={hash_key}]"
+    contextvars.Context().run(_send, saved, [{"role": "user", "content": text}])
+    path = tmp_path / "prefix-state.json"
+    assert saved.save_state(str(path)) == 1
+    fakeredis.FakeRedis(server=server).flushall()  # Redis lost it; only the state file has it
+    monkeypatch.setenv(PREFIX_STATE_FILE_ENV, str(path))
+
+    def start() -> int:
+        config = ProxyConfig(optimize=False, rate_limit_enabled=False, cost_tracking_enabled=False)
+        with TestClient(create_app(config)) as app_client:
+            return app_client.app.state.proxy.session_tracker_store.active_sessions
+
+    client.outage = outage
+    # load_state treats the failed import like a bad file: the proxy starts and
+    # installs no tracker, so none replays a marker whose original is gone.
+    assert start() == 0
 
 
 def _router(**config):
