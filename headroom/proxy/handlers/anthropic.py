@@ -5771,7 +5771,11 @@ class AnthropicHandlerMixin:
             return capability_error
 
         from headroom.ccr import CCRToolInjector
-        from headroom.proxy.helpers import MAX_REQUEST_BODY_SIZE, _read_request_json
+        from headroom.proxy.helpers import (
+            MAX_REQUEST_BODY_SIZE,
+            _headroom_bypass_enabled,
+            read_request_json_with_bytes,
+        )
         from headroom.proxy.modes import is_cache_mode
         from headroom.utils import extract_user_query
 
@@ -5794,7 +5798,7 @@ class AnthropicHandlerMixin:
 
         # Parse request
         try:
-            body = await _read_request_json(request)
+            body, original_body_bytes = await read_request_json_with_bytes(request)
         except (json.JSONDecodeError, ValueError) as e:
             return JSONResponse(
                 status_code=400,
@@ -5848,6 +5852,20 @@ class AnthropicHandlerMixin:
             request_id=request_id,
         )
 
+        # Same two gates the OpenAI and Google batch paths apply: the client's
+        # bypass/passthrough header, and the commercial gate (fails open when no
+        # reporter is configured or no license info exists yet).
+        _bypass = _headroom_bypass_enabled(request.headers)
+        license_ok = (
+            self.usage_reporter.should_compress if self.usage_reporter is not None else True
+        )
+        if _bypass:
+            logger.info(f"[{request_id}] Compression skipped: reason=bypass_header")
+            tags["passthrough_reason"] = "bypass_header"
+        elif not license_ok:
+            logger.info(f"[{request_id}] Compression skipped: reason=license_denied")
+            tags["passthrough_reason"] = "license_denied"
+
         # Track compression stats across all batch requests
         total_original_tokens = 0
         total_optimized_tokens = 0
@@ -5874,6 +5892,10 @@ class AnthropicHandlerMixin:
             cache_ttl_seconds = anthropic_cache_ttl_seconds(
                 model, original_messages, params.get("system")
             )
+
+            if _bypass or not license_ok:
+                compressed_requests.append(batch_req)
+                continue
 
             if not messages or not self.config.optimize:
                 # No messages or optimization disabled - pass through unchanged
@@ -6024,14 +6046,15 @@ class AnthropicHandlerMixin:
         url = f"{self.ANTHROPIC_API_URL}/v1/messages/batches"
 
         try:
-            # Body is always mutated for batch (compressed requests).
+            # Mutated unless bypassed: bypass forwards the client's exact bytes.
             response = await self._retry_request(
                 "POST",
                 url,
                 headers,
                 body,
-                body_mutated=True,
-                mutation_reasons=["batch_compression"],
+                original_body_bytes=original_body_bytes if _bypass else None,
+                body_mutated=not _bypass,
+                mutation_reasons=[] if _bypass else ["batch_compression"],
                 request_id=request_id,
                 forwarder_name="anthropic_batch",
                 path_for_log="/v1/messages/batches",
