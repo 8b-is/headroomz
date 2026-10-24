@@ -113,6 +113,7 @@ from headroom.proxy.buffered_ccr_response import (
 from headroom.proxy.compression_decision import CompressionDecision
 from headroom.proxy.cost import header_safe_transforms
 from headroom.proxy.handlers._debug_dump import _debug_dump_mode, _redact_debug_value
+from headroom.proxy.handlers.streaming import _stream_outcome_status
 from headroom.proxy.image_isolation import run_image_compression_isolated
 from headroom.proxy.outcome import RequestOutcome
 from headroom.proxy.output_shaper import shaper_enabled_for, steering_allowed_for
@@ -11759,10 +11760,20 @@ class OpenAIHandlerMixin:
                         )
                         yield chunk
             finally:
+                completed_normally = True
                 buf = stream_state["sse_buffer"]
                 if len(buf) > 0:
                     buf.extend(b"\n\n")
-                    _absorb_usage(self._parse_sse_usage_from_buffer(stream_state, stream_provider))
+                    # A truncated stream can end inside a multi-byte character;
+                    # the strict decoder then raises and would skip the outcome
+                    # below. Keep the usage already parsed, drop the unusable
+                    # tail, and report the stream as failed.
+                    try:
+                        _absorb_usage(
+                            self._parse_sse_usage_from_buffer(stream_state, stream_provider)
+                        )
+                    except UnicodeDecodeError:
+                        completed_normally = False
 
                 output_tokens = stream_state["output_tokens"] or 0
                 cache_read_tokens = stream_state["cache_read_input_tokens"] or 0
@@ -11803,6 +11814,9 @@ class OpenAIHandlerMixin:
                         total_latency_ms=(time.time() - start_time) * 1000,
                         ttfb_ms=stream_state["ttfb_ms"] or 0,
                         tags=tags,
+                        status_code=_stream_outcome_status(
+                            upstream_response.status_code, completed_normally
+                        ),
                         client=client,
                     )
                 )
