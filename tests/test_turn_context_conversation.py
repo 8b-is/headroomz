@@ -23,6 +23,7 @@ pytest.importorskip("fastapi")
 from fastapi.testclient import TestClient  # noqa: E402
 
 import headroom.proxy.handlers.openai as openai_module  # noqa: E402
+from headroom.proxy.conversation_savings import savings_conversation_key  # noqa: E402
 from headroom.proxy.loopback_guard import require_loopback  # noqa: E402
 from headroom.proxy.server import ProxyConfig, create_app  # noqa: E402
 from headroom.proxy.turn_hooks import clear_turn_hooks, register_turn_hook  # noqa: E402
@@ -142,6 +143,39 @@ def test_responses_http_turns_of_one_thread_share_a_conversation(recorder):
     first, incremental, other = recorder.seen
     assert first == incremental and first is not None
     assert other not in (None, first)
+
+
+@respx.mock
+def test_responses_server_side_conversation_names_the_conversation(recorder):
+    respx.post("https://api.openai.com/v1/responses").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "id": "resp_1",
+                "output": [{"type": "message", "role": "assistant", "content": []}],
+                "usage": {"input_tokens": 10, "output_tokens": 1},
+            },
+        )
+    )
+
+    def body(conversation: Any) -> dict[str, Any]:
+        return {
+            "model": "gpt-4o",
+            "input": [{"type": "message", "role": "user", "content": "fix the bug"}],
+            "stream": False,
+            "conversation": conversation,
+        }
+
+    sent = [body("conv_1"), body("conv_1"), body({"id": "conv_1"}), body("conv_2")]
+    with TestClient(_app(optimize=True)) as client:
+        for one in sent:
+            r = client.post("/v1/responses", json=one, headers={"authorization": "Bearer sk-t"})
+            assert r.status_code == 200, r.text
+    first, again, as_object, other = recorder.seen
+    assert first == again == as_object and first is not None
+    assert other not in (None, first)
+    # The savings funnel still books these per request: the provider holds the history.
+    assert all(savings_conversation_key(one) is None for one in sent)
 
 
 def _ws_frame(thread: str, **extra: Any) -> str:

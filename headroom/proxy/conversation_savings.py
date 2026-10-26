@@ -113,13 +113,15 @@ def turn_conversation_key(body: Any, *, session_id: str | None = None) -> str | 
     Premise 1 of :func:`savings_conversation_key` only, with the same ids and
     the same digest: an incremental body (``previous_response_id``) still
     belongs to its conversation, so this is the key turn hooks see as
-    ``TurnContext.conversation`` on every turn.
+    ``TurnContext.conversation`` on every turn. So does a body that names a
+    server-side ``conversation`` (an id, or an object with one), which
+    :func:`savings_conversation_key` excludes before calling this.
     """
     if not isinstance(body, dict):
         return None
     body = _unwrap_response_create_body(body)
     identity = ""
-    for key in ("conversation_id", "thread_id", "session_id"):
+    for key in ("conversation_id", "thread_id", "session_id", "conversation"):
         value = _explicit_id(body.get(key))
         if value:
             identity = f"{key}:{value}"
