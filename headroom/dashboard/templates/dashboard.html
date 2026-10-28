@@ -2056,12 +2056,12 @@
             return {
                 stats: {},
                 teamsPerkDismissed: (() => {
-                    try { return localStorage.getItem('headroom-teams-perk-dismissed') === '1'; }
+                    try { return localStorage.getItem('headroom-teams-contact-dismissed') === '1'; }
                     catch (e) { return false; }
                 })(),
                 dismissTeamsPerk() {
                     this.teamsPerkDismissed = true;
-                    try { localStorage.setItem('headroom-teams-perk-dismissed', '1'); } catch (e) {}
+                    try { localStorage.setItem('headroom-teams-contact-dismissed', '1'); } catch (e) {}
                 },
                 lifetimeStats: {},
                 historyStats: {},
