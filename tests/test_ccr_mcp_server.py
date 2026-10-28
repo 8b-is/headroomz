@@ -5,6 +5,7 @@ import contextlib
 import http.server
 import json
 import logging
+import shutil
 import threading
 
 import pytest
@@ -215,7 +216,9 @@ def test_read_tool_reads_nothing_from_root_or_home_without_roots(
     # GUI hosts launch MCP servers from `/`; a working-directory root there
     # (or in $HOME) would cover ~/.ssh and everything else.
     _, secret = workspace_and_secret
-    monkeypatch.setenv("HOME", str(secret.parent))
+    # Path.home(), not $HOME: Windows reads USERPROFILE, so only the former
+    # makes this directory the process home on every platform.
+    monkeypatch.setattr(mcp_server.Path, "home", lambda: secret.parent)
     monkeypatch.chdir(secret.parent if start_in == "home" else secret.anchor)
     server = mcp_server.HeadroomMCPServer(check_proxy=False)
 
@@ -223,6 +226,33 @@ def test_read_tool_reads_nothing_from_root_or_home_without_roots(
 
     assert "TOP_SECRET" not in text
     assert "HEADROOM_MCP_READ_ROOTS" in json.loads(text)["error"]
+
+
+def test_read_tool_refuses_a_directory_swapped_for_a_symlink_after_the_check(
+    fresh_store, workspace_and_secret, monkeypatch
+) -> None:
+    # The boundary check and the open are separate steps. If a directory on
+    # the way is replaced by a symlink in between, the open must refuse it
+    # rather than follow it out of the workspace.
+    workspace, secret = workspace_and_secret
+    (workspace / "data").mkdir()
+    (workspace / "data" / "report.txt").write_text("PUBLIC\n", encoding="utf-8")
+    (secret.parent / "report.txt").write_text("OUTSIDE_SECRET\n", encoding="utf-8")
+    real_open = mcp_server._open_within
+
+    def swap_then_open(path, root):
+        shutil.rmtree(workspace / "data")
+        (workspace / "data").symlink_to(secret.parent)
+        return real_open(path, root)
+
+    monkeypatch.setattr(mcp_server, "_open_within", swap_then_open)
+    server = mcp_server.HeadroomMCPServer(check_proxy=False)
+
+    text = _read_text(server, "data/report.txt")
+
+    assert "OUTSIDE_SECRET" not in text
+    assert "outside the workspace" in json.loads(text)["error"]
+    assert server._file_cache == {}
 
 
 def test_read_tool_reads_inside_the_workspace(fresh_store, workspace_and_secret) -> None:

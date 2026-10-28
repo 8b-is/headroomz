@@ -25,9 +25,11 @@ from __future__ import annotations
 import argparse
 import asyncio
 import contextlib
+import errno
 import json
 import logging
 import os
+import stat
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -393,6 +395,47 @@ def _read_roots() -> list[Path]:
     if cwd == Path(cwd.anchor) or cwd == Path.home().resolve():
         return []
     return [cwd]
+
+
+_O_CLOEXEC = getattr(os, "O_CLOEXEC", 0)
+
+
+def _open_within(path: Path, root: Path) -> int:
+    """Open ``path`` for reading, re-checking the boundary at open time.
+
+    ``path`` is already resolved and inside ``root``, but the check and the
+    open are separate steps: if a directory on the way is swapped for a
+    symlink in between, a plain ``open()`` follows the new link wherever it
+    points. So walk from ``root`` one component at a time with O_NOFOLLOW; a
+    component that has become a symlink is refused (ELOOP) instead of
+    followed. Without openat semantics (Windows) open directly and confirm
+    the path still resolves to what was checked; best effort there.
+    """
+    if os.open not in os.supports_dir_fd or not hasattr(os, "O_NOFOLLOW"):
+        fd = os.open(path, os.O_RDONLY | getattr(os, "O_BINARY", 0) | _O_CLOEXEC)
+        if path.resolve() != path:
+            os.close(fd)
+            raise OSError(errno.ELOOP, "path changed between check and open", str(path))
+        return fd
+    parts = path.relative_to(root).parts
+    fd = os.open(root, os.O_RDONLY | os.O_DIRECTORY | _O_CLOEXEC)
+    try:
+        for part in parts[:-1]:
+            # O_NOFOLLOW alone, then S_ISDIR: with O_DIRECTORY as well, macOS
+            # reports a symlink as ENOTDIR and the swap would look like a
+            # missing file instead of being refused.
+            next_fd = os.open(part, os.O_RDONLY | os.O_NOFOLLOW | _O_CLOEXEC, dir_fd=fd)
+            os.close(fd)
+            fd = next_fd
+            if not stat.S_ISDIR(os.fstat(fd).st_mode):
+                raise NotADirectoryError(errno.ENOTDIR, "Not a directory", str(path))
+        # ``path == root`` opens the directory itself; the caller's S_ISREG
+        # check then answers "Not a file" like any other directory.
+        return os.open(
+            parts[-1] if parts else ".", os.O_RDONLY | os.O_NOFOLLOW | _O_CLOEXEC, dir_fd=fd
+        )
+    finally:
+        os.close(fd)
 
 
 class HeadroomMCPServer:
@@ -1053,11 +1096,7 @@ class HeadroomMCPServer:
         # and check it before exists() so the tool is not an existence oracle.
         # A path that cannot be resolved (symlink loop, NUL byte) gets the same
         # answer, so its error text cannot reveal anything outside either.
-        try:
-            path: Path | None = Path(file_path).expanduser().resolve()
-        except (OSError, RuntimeError, ValueError):
-            path = None
-        if path is None or not any(path.is_relative_to(root) for root in _read_roots()):
+        def outside() -> list[TextContent]:
             return [
                 TextContent(
                     type="text",
@@ -1071,37 +1110,64 @@ class HeadroomMCPServer:
                     ),
                 )
             ]
-        if not path.exists():
+
+        try:
+            path: Path | None = Path(file_path).expanduser().resolve()
+        except (OSError, RuntimeError, ValueError):
+            path = None
+        root = (
+            None
+            if path is None
+            else next((r for r in _read_roots() if path.is_relative_to(r)), None)
+        )
+        if path is None or root is None:
+            return outside()
+
+        # Open through the checked root, so a directory swapped for a symlink
+        # after the check above is refused rather than followed (see
+        # _open_within). Inside the roots, a missing path and a directory
+        # keep their specific answers.
+        fd = -1
+        try:
+            fd = _open_within(path, root)
+            if not stat.S_ISREG(os.fstat(fd).st_mode):
+                return [
+                    TextContent(
+                        type="text",
+                        text=json.dumps({"error": f"Not a file: {file_path}"}),
+                    )
+                ]
+            handle = os.fdopen(fd, "rb")
+            fd = -1
+            with handle:
+                raw = handle.read()
+        except (FileNotFoundError, NotADirectoryError):
             return [
                 TextContent(
                     type="text",
                     text=json.dumps({"error": f"File not found: {file_path}"}),
                 )
             ]
-        if not path.is_file():
-            return [
-                TextContent(
-                    type="text",
-                    text=json.dumps({"error": f"Not a file: {file_path}"}),
-                )
-            ]
-
-        # Read file from disk. PR-A8 / P1-8: avoid lossy decode kwargs
-        # in headroom/ccr/ — use the centralized safe-log decoder so
-        # the project-wide grep stays clean (this path is for tool
-        # output display, not SSE/wire path, so a replacement char on
-        # invalid bytes is acceptable).
-        try:
-            from headroom.proxy.helpers import safe_decode_for_logging
-
-            content = safe_decode_for_logging(path.read_bytes())
-        except Exception as e:
+        except OSError as e:
+            if e.errno == errno.ELOOP:
+                return outside()
             return [
                 TextContent(
                     type="text",
                     text=json.dumps({"error": f"Cannot read file: {e}"}),
                 )
             ]
+        finally:
+            if fd != -1:
+                os.close(fd)
+
+        # PR-A8 / P1-8: avoid lossy decode kwargs in headroom/ccr/ — use the
+        # centralized safe-log decoder so the project-wide grep stays clean
+        # (this path is for tool output display, not SSE/wire path, so a
+        # replacement char on invalid bytes is acceptable).
+        from headroom.proxy.helpers import safe_decode_for_logging
+
+        content = safe_decode_for_logging(raw)
 
         content_hash = hashlib.sha256(content.encode()).hexdigest()[:24]
         line_count = content.count("\n") + (1 if content and not content.endswith("\n") else 0)
