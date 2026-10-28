@@ -1,6 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 880 240" width="880" height="240" role="img"
-     aria-label="Headroom Enterprise for teams: 3 months free with a 12-month plan. Adds tool search, model routing, attack removal and org-wide savings. Claim the perk.">
-  <title>Headroom Enterprise — 3 months free with a 12-month plan</title>
+     aria-label="Headroom Enterprise for teams. Adds tool search, model routing, attack removal and org-wide savings. Talk to us: hello@headroomlabs.ai.">
+  <title>Headroom Enterprise for teams — talk to us</title>
 
   <defs>
     <!-- Brand palette as in hero.svg: Mint #00F0B5, Obsidian #070A0F,
@@ -63,8 +63,8 @@
     <text x="60" y="53" font-size="16" font-weight="600" letter-spacing="1.5" fill="#00F0B5">HEADROOM ENTERPRISE · FOR TEAMS</text>
 
     <!-- Headline -->
-    <text x="40" y="116" font-size="52" font-weight="700" fill="#FFFFFF">3 months free</text>
-    <text x="40" y="152" font-size="20" fill="#98A4B3">with a 12-month plan · one perk per company</text>
+    <text x="40" y="116" font-size="52" font-weight="700" fill="#FFFFFF">Built for teams</text>
+    <text x="40" y="152" font-size="20" fill="#98A4B3">Roll Headroom out across your whole org</text>
 
     <!-- What Enterprise adds -->
     <g font-size="16" fill="#E6EDF3">
@@ -90,7 +90,7 @@
       <rect x="646" y="94" width="208" height="58" rx="29" fill="url(#pbtn)"/>
       <rect class="shine" x="646" y="94" width="70" height="58" fill="url(#pshine)"/>
     </g>
-    <text x="750" y="130" font-size="20" font-weight="700" text-anchor="middle" fill="#070A0F">Claim the perk  →</text>
-    <text x="750" y="190" font-size="16" text-anchor="middle" fill="#98A4B3">headroom-perks.vercel.app</text>
+    <text x="750" y="130" font-size="20" font-weight="700" text-anchor="middle" fill="#070A0F">Talk to us  →</text>
+    <text x="750" y="190" font-size="16" text-anchor="middle" fill="#98A4B3">hello@headroomlabs.ai</text>
   </g>
 </svg>

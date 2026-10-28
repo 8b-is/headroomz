@@ -39,7 +39,7 @@ answers, fraction of the tokens. Compression runs on your machine; no prompt or
 file content is sent anywhere to be compressed.
 
 <p align="center">
-  <a href="https://headroom-perks.vercel.app/?source=github&utm_source=github&utm_medium=readme&utm_content=banner"><img src=".github/assets/enterprise-perk.svg" alt="Headroom Enterprise for teams: 3 months free with a 12-month plan. Claim the perk." width="880"></a>
+  <a href="https://headroomlabs.ai"><img src=".github/assets/enterprise-perk.svg" alt="Headroom Enterprise for teams. Talk to us: hello@headroomlabs.ai." width="880"></a>
 </p>
 
 <div align="center">
@@ -638,12 +638,9 @@ for the whole team.
 | Rollout | Per laptop | Managed or in your VPC, SSO, central config, org-wide savings |
 | Support | GitHub, Discord | Dedicated engineers, onboarding, priority response |
 
-**3 months of Enterprise free.** Companies that sign a 12-month Enterprise plan get
-their first 3 months free. One perk per company.
-
-**[Claim 3 months free →](https://headroom-perks.vercel.app/?source=github&utm_source=github&utm_medium=readme&utm_content=teams)**
-· or email [hello@headroomlabs.ai](mailto:hello@headroomlabs.ai) with your stack and
-monthly LLM spend.
+**Want Headroom for your team? Talk to us.** Email
+[hello@headroomlabs.ai](mailto:hello@headroomlabs.ai) with your stack and rough monthly
+LLM spend, or visit [headroomlabs.ai](https://headroomlabs.ai).
 
 Everything in this repo stays open source under Apache 2.0.
 
