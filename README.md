@@ -183,13 +183,10 @@ back at you, and deep reasoning spent on routine steps like reading a file.
 Headroom trims it from the proxy, with no change to your code:
 
 - **Verbosity steering** appends a short "be terse, don't restate context" note to the *end* of the system prompt, so your prompt cache still hits.
-- **Effort routing** dials thinking effort down when a turn is only the model resuming after a tool result — a file read, a passing test. New questions and errors keep full effort.
 
-Both apply to Anthropic `/v1/messages` and to OpenAI-compatible
-`/v1/chat/completions` and `/v1/responses`. Effort routing uses
-`reasoning_effort` on OpenAI and `thinking.budget_tokens` / `output_config.effort`
-on Anthropic, with the same clamp-only invariant and the same `output_shaper:*`
-labels on both paths.
+It applies to Anthropic `/v1/messages` and to OpenAI-compatible
+`/v1/chat/completions` and `/v1/responses`, with the same `output_shaper:*`
+labels on all paths.
 
 ```bash
 export HEADROOM_OUTPUT_SHAPER=1     # off by default
@@ -446,7 +443,7 @@ Granular extras: `[proxy]`, `[mcp]`, `[ml]` (Kompress-v2-base), `[code]`,
 `[memory]`, `[vector]` (optional HNSW backend — needs a C++ toolchain, not in
 `[all]`), `[relevance]`, `[image]`, `[agno]`, `[langchain]`, `[evals]`,
 `[pytorch-mps]` (Apple-GPU memory-embedder offload — set
-`HEADROOM_EMBEDDER_RUNTIME=pytorch_mps`). Requires **Python 3.10+**.
+`HEADROOM_EMBEDDER_RUNTIME=pytorch_mps`). Requires **Python 3.11+**.
 
 > `[all]` covers the core stack but not the framework adapters. Install those
 > separately: `pip install "headroom-ai[langchain]"`, and likewise `[agno]`,
