@@ -398,18 +398,24 @@ def _read_roots() -> list[Path]:
 
 
 _O_CLOEXEC = getattr(os, "O_CLOEXEC", 0)
+_O_NONBLOCK = getattr(os, "O_NONBLOCK", 0)
 
 
-def _open_within(path: Path, root: Path) -> int:
-    """Open ``path`` for reading, re-checking the boundary at open time.
+def _open_nofollow(path: Path) -> int:
+    """Open the resolved ``path`` for reading without following any symlink.
 
-    ``path`` is already resolved and inside ``root``, but the check and the
-    open are separate steps: if a directory on the way is swapped for a
-    symlink in between, a plain ``open()`` follows the new link wherever it
-    points. So walk from ``root`` one component at a time with O_NOFOLLOW; a
-    component that has become a symlink is refused (ELOOP) instead of
-    followed. Without openat semantics (Windows) open directly and confirm
-    the path still resolves to what was checked; best effort there.
+    The boundary check and the open are separate steps. ``path`` had no
+    symlinks when it was resolved, but any component -- the file, a directory
+    on the way, the permitted root itself or one of its parents -- can have
+    been replaced by a symlink since, and a plain ``open()`` would follow it
+    wherever it points. So walk the whole path from its anchor one component
+    at a time with O_NOFOLLOW: a component that has become a symlink is
+    refused (ELOOP) rather than followed. Opens are non-blocking so a FIFO
+    put in the way cannot stall the event loop; the caller's S_ISREG check
+    rejects it, and a regular file reads the same either way.
+
+    Without openat semantics (Windows) open directly and confirm the path
+    still resolves to what was checked; best effort there.
     """
     if os.open not in os.supports_dir_fd or not hasattr(os, "O_NOFOLLOW"):
         fd = os.open(path, os.O_RDONLY | getattr(os, "O_BINARY", 0) | _O_CLOEXEC)
@@ -417,25 +423,27 @@ def _open_within(path: Path, root: Path) -> int:
             os.close(fd)
             raise OSError(errno.ELOOP, "path changed between check and open", str(path))
         return fd
-    parts = path.relative_to(root).parts
-    fd = os.open(root, os.O_RDONLY | os.O_DIRECTORY | _O_CLOEXEC)
+    import fcntl
+
+    flags = os.O_RDONLY | os.O_NOFOLLOW | _O_NONBLOCK | _O_CLOEXEC
+    parts = path.parts
+    fd = os.open(parts[0], os.O_RDONLY | os.O_DIRECTORY | _O_CLOEXEC)
     try:
-        for part in parts[:-1]:
-            # O_NOFOLLOW alone, then S_ISDIR: with O_DIRECTORY as well, macOS
-            # reports a symlink as ENOTDIR and the swap would look like a
-            # missing file instead of being refused.
-            next_fd = os.open(part, os.O_RDONLY | os.O_NOFOLLOW | _O_CLOEXEC, dir_fd=fd)
+        for part in parts[1:-1]:
+            next_fd = os.open(part, flags, dir_fd=fd)
             os.close(fd)
             fd = next_fd
+            # S_ISDIR here rather than O_DIRECTORY on the open: with both
+            # flags macOS reports a symlink as ENOTDIR, which would make a
+            # swapped component look like a missing file instead of a refusal.
             if not stat.S_ISDIR(os.fstat(fd).st_mode):
                 raise NotADirectoryError(errno.ENOTDIR, "Not a directory", str(path))
-        # ``path == root`` opens the directory itself; the caller's S_ISREG
-        # check then answers "Not a file" like any other directory.
-        return os.open(
-            parts[-1] if parts else ".", os.O_RDONLY | os.O_NOFOLLOW | _O_CLOEXEC, dir_fd=fd
-        )
+        file_fd = os.open(parts[-1] if len(parts) > 1 else ".", flags, dir_fd=fd)
     finally:
         os.close(fd)
+    if _O_NONBLOCK:
+        fcntl.fcntl(file_fd, fcntl.F_SETFL, fcntl.fcntl(file_fd, fcntl.F_GETFL) & ~_O_NONBLOCK)
+    return file_fd
 
 
 class HeadroomMCPServer:
@@ -1123,13 +1131,13 @@ class HeadroomMCPServer:
         if path is None or root is None:
             return outside()
 
-        # Open through the checked root, so a directory swapped for a symlink
+        # Open without following symlinks, so a component swapped for one
         # after the check above is refused rather than followed (see
-        # _open_within). Inside the roots, a missing path and a directory
+        # _open_nofollow). Inside the roots, a missing path and a directory
         # keep their specific answers.
         fd = -1
         try:
-            fd = _open_within(path, root)
+            fd = _open_nofollow(path)
             if not stat.S_ISREG(os.fstat(fd).st_mode):
                 return [
                     TextContent(

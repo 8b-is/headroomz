@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import asyncio
+import concurrent.futures
 import contextlib
 import http.server
 import json
 import logging
+import os
 import shutil
 import threading
 
@@ -228,30 +230,86 @@ def test_read_tool_reads_nothing_from_root_or_home_without_roots(
     assert "HEADROOM_MCP_READ_ROOTS" in json.loads(text)["error"]
 
 
-def test_read_tool_refuses_a_directory_swapped_for_a_symlink_after_the_check(
-    fresh_store, workspace_and_secret, monkeypatch
+def _swap_before_open(monkeypatch, swap) -> None:
+    """Run ``swap`` between the boundary check and the open, as a racing writer would."""
+    real_open = mcp_server._open_nofollow
+
+    def swap_then_open(path):
+        swap()
+        return real_open(path)
+
+    monkeypatch.setattr(mcp_server, "_open_nofollow", swap_then_open)
+
+
+def _read_text_promptly(server, file_path: str) -> str:
+    # A FIFO put in the way must not block the open; a stuck call fails here
+    # instead of hanging the suite.
+    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+        return pool.submit(_read_text, server, file_path).result(timeout=5)
+
+
+@pytest.mark.parametrize("replaced", ["directory", "root"])
+def test_read_tool_refuses_a_symlink_swapped_in_after_the_check(
+    fresh_store, workspace_and_secret, monkeypatch, replaced
 ) -> None:
     # The boundary check and the open are separate steps. If a directory on
-    # the way is replaced by a symlink in between, the open must refuse it
-    # rather than follow it out of the workspace.
+    # the way, or the permitted root itself, is replaced by a symlink in
+    # between, the open must refuse it rather than follow it out.
     workspace, secret = workspace_and_secret
     (workspace / "data").mkdir()
     (workspace / "data" / "report.txt").write_text("PUBLIC\n", encoding="utf-8")
     (secret.parent / "report.txt").write_text("OUTSIDE_SECRET\n", encoding="utf-8")
-    real_open = mcp_server._open_within
+    if replaced == "directory":
+        file_path = "data/report.txt"
 
-    def swap_then_open(path, root):
-        shutil.rmtree(workspace / "data")
-        (workspace / "data").symlink_to(secret.parent)
-        return real_open(path, root)
+        def swap():
+            shutil.rmtree(workspace / "data")
+            (workspace / "data").symlink_to(secret.parent)
+    else:
+        (workspace / "report.txt").write_text("PUBLIC\n", encoding="utf-8")
+        file_path = "report.txt"
 
-    monkeypatch.setattr(mcp_server, "_open_within", swap_then_open)
+        def swap():
+            workspace.rename(workspace.parent / "moved-away")
+            workspace.symlink_to(secret.parent)
+
+    _swap_before_open(monkeypatch, swap)
     server = mcp_server.HeadroomMCPServer(check_proxy=False)
 
-    text = _read_text(server, "data/report.txt")
+    text = _read_text(server, file_path)
 
     assert "OUTSIDE_SECRET" not in text
     assert "outside the workspace" in json.loads(text)["error"]
+    assert server._file_cache == {}
+
+
+@pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="named pipes are POSIX")
+@pytest.mark.parametrize("where", ["target", "directory"])
+def test_read_tool_does_not_block_on_a_fifo(
+    fresh_store, workspace_and_secret, monkeypatch, where
+) -> None:
+    # Opening a FIFO for reading blocks until a writer appears; the read tool
+    # runs on the MCP event loop, so it must refuse one without waiting.
+    workspace, _ = workspace_and_secret
+    if where == "target":
+        os.mkfifo(workspace / "pipe")
+        file_path = "pipe"
+    else:
+        (workspace / "data").mkdir()
+        (workspace / "data" / "report.txt").write_text("PUBLIC\n", encoding="utf-8")
+        file_path = "data/report.txt"
+
+        def swap():
+            shutil.rmtree(workspace / "data")
+            os.mkfifo(workspace / "data")
+
+        _swap_before_open(monkeypatch, swap)
+    server = mcp_server.HeadroomMCPServer(check_proxy=False)
+
+    text = _read_text_promptly(server, file_path)
+
+    assert "PUBLIC" not in text
+    assert json.loads(text)["error"].startswith(("Not a file", "File not found"))
     assert server._file_cache == {}
 
 
