@@ -56,7 +56,7 @@ export default function Layout({ children }: LayoutProps<'/'>) {
               href="https://headroomlabs.ai"
               className="font-medium underline-offset-4 hover:underline"
             >
-              Headroom for Teams: talk to us →
+              Want more savings? Headroom for teams and enterprises: talk to us →
             </a>
           </Banner>
           {children}

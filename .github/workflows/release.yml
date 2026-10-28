@@ -1079,7 +1079,7 @@ jobs:
           if ! grep -qF "$MARKER" release-notes.md; then
             {
               printf '\n%s\n\n---\n\n' "$MARKER"
-              printf '**Headroom for Teams:** want Headroom across your team? Talk to us at '
+              printf '**Want more savings?** Headroom Enterprise saves more for teams and enterprises. Talk to us at '
               printf '[hello@headroomlabs.ai](mailto:hello@headroomlabs.ai) or [headroomlabs.ai](https://headroomlabs.ai).\n'
             } >> release-notes.md
             gh release edit "$TAG" --notes-file release-notes.md

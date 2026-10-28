@@ -627,20 +627,18 @@ Turn it off with `HEADROOM_BEACON=off`, `HEADROOM_TELEMETRY=off`, the
 
 ## Headroom for teams
 
-Headroom OSS is built for one developer on one laptop. Headroom Enterprise is built
-for the whole team.
+**Not seeing the savings you want?** Headroom OSS is a framework. It was built to show
+what's possible on one developer's laptop, so it saves less than it could. We are
+building bigger savings for teams and enterprises in Headroom Enterprise, which adds:
 
-| | Open source | Enterprise |
-|---|---|---|
-| Savings | Compression, plus tool search on Anthropic requests (on by default) | Also: tool search for every model, harness tuning, extra compressors |
-| Model routing | Rule-based and opt-in: turn it on with `HEADROOM_MODEL_ROUTER_ENABLED=1` and write the rules in `HEADROOM_MODEL_ROUTES` | Automatic: a cheaper model per request when quality allows, with a shadow mode that shows the savings before you turn it on |
-| Security | — | Detect and strip prompt injection and risky tool calls |
-| Rollout | Per laptop | Managed or in your VPC, SSO, central config, org-wide savings |
-| Support | GitHub, Discord | Dedicated engineers, onboarding, priority response |
+- More cost savings
+- Tokens secured
+- On premise deployment
+- Deep attribution
+- And many more features
 
-**Want Headroom for your team? Talk to us.** Email
-[hello@headroomlabs.ai](mailto:hello@headroomlabs.ai) with your stack and rough monthly
-LLM spend, or visit [headroomlabs.ai](https://headroomlabs.ai).
+If you're a team or an enterprise, **talk to us**:
+[hello@headroomlabs.ai](mailto:hello@headroomlabs.ai) · [headroomlabs.ai](https://headroomlabs.ai)
 
 Everything in this repo stays open source under Apache 2.0.
 
