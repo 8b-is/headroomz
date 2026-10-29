@@ -78,11 +78,14 @@ class TokenCountCache:
         must not run the eviction check (a dict hit would clear the whole
         cache and force a full re-encode of every cached message on the
         next miss — the storm this exists to prevent).
+        Oversized texts are never admitted, so warm entries survive.
         """
         if text in self._counts:
             self._counts[text] = count
             return
         if len(text) < self._min_chars:
+            return
+        if len(text) > self._max_chars:
             return
         if len(self._counts) >= self._max_entries or self._chars >= self._max_chars:
             self._counts.clear()
