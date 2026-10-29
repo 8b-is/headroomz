@@ -4334,6 +4334,24 @@ class OpenAIHandlerMixin:
             optimized_messages, original_client_messages
         )
 
+        from headroom.proxy.helpers import enforce_cache_breakpoint_budget
+
+        # Bypass (x-headroom-bypass: true, _bypass computed at ~L3458) opts out
+        # of ALL compression: never mutate those requests here.
+        # client_messages=None: passing the client list runs
+        # normalize_message_cache_control, whose block-level legacy fallback can
+        # add a marker to a list-content user message on chat requests and then
+        # cost a real system marker. Without it only the oldest-first drop runs
+        # — stale replayed markers are oldest, so they go first.
+        if not _bypass:
+            _, optimized_messages, tools, _ = enforce_cache_breakpoint_budget(
+                None,
+                optimized_messages,
+                tools,
+                client_messages=None,
+                request_id=request_id,
+            )
+
         # Memory: inject context and tools for OpenAI requests.
         #
         # PR-A3 follow-up to A2: memory context now routes exclusively to
