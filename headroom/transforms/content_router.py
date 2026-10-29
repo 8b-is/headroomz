@@ -3778,6 +3778,31 @@ class ContentRouter(Transform):
 
         return cand, f"lossless_{kind}"
 
+    @staticmethod
+    def _validate_provider_output(supplied: Any) -> tuple[str, str] | None:
+        """Contract check shared by the general and excluded-tool provider paths.
+
+        Returns ``(candidate, safe_kind)`` or ``None`` ("ignore"). Never raises.
+        """
+        if supplied is None:
+            return None
+        if not isinstance(supplied, tuple | list) or len(supplied) != 2:
+            logger.debug("lossless provider returned a malformed result; ignoring")
+            return None
+        if not isinstance(supplied[0], str) or not isinstance(supplied[1], str):
+            logger.debug("lossless provider returned non-str members; ignoring")
+            return None
+        # An empty / whitespace-only "fold" wins every length comparison and
+        # would silently delete the block's content. That is not lossless.
+        if not supplied[0].strip():
+            logger.debug("lossless provider returned an empty result; ignoring")
+            return None
+        # fullmatch, not match: Python's `$` also matches just BEFORE a
+        # trailing newline, so `re.match` would let "log\n" through and
+        # put a newline into a metric label.
+        kind = supplied[1] if _PROVIDER_KIND_RE.fullmatch(supplied[1]) else _PROVIDER_KIND_FALLBACK
+        return (supplied[0], kind)
+
     def _lossless_provider_result(self, content: str) -> tuple[str, str] | None:
         """Validated + memoized ``(candidate, safe_kind)`` from the provider.
 
@@ -3808,29 +3833,7 @@ class ContentRouter(Transform):
 
         result: tuple[str, str] | None = None
         try:
-            supplied = provider(content)
-            if supplied is None:
-                result = None
-            # Validate defensively *inside* the try: unpacking a 3-tuple / a bare
-            # string / a non-sequence raises, and that exception used to escape
-            # all the way out of the request.
-            elif not isinstance(supplied, tuple | list) or len(supplied) != 2:
-                logger.debug("lossless provider returned a malformed result; ignoring")
-            elif not isinstance(supplied[0], str) or not isinstance(supplied[1], str):
-                logger.debug("lossless provider returned non-str members; ignoring")
-            # An empty / whitespace-only "fold" wins every length comparison and
-            # would silently delete the block's content. That is not lossless.
-            elif not supplied[0].strip():
-                logger.debug("lossless provider returned an empty result; ignoring")
-            else:
-                raw_kind = supplied[1]
-                # fullmatch, not match: Python's `$` also matches just BEFORE a
-                # trailing newline, so `re.match` would let "log\n" through and
-                # put a newline into a metric label.
-                kind = (
-                    raw_kind if _PROVIDER_KIND_RE.fullmatch(raw_kind) else _PROVIDER_KIND_FALLBACK
-                )
-                result = (supplied[0], kind)
+            result = self._validate_provider_output(provider(content))
         except Exception:  # noqa: BLE001 - a broken provider must not break routing
             logger.debug("lossless provider failed in _lossless_first", exc_info=True)
             result = None
@@ -7337,7 +7340,7 @@ class ContentRouter(Transform):
             try:
                 # A registered provider is authoritative for excluded-tool
                 # compaction; fall back to the built-in folds only if it raises.
-                return provider(content)
+                return self._validate_provider_output(provider(content))
             except Exception:  # noqa: BLE001
                 logger.debug(
                     "lossless provider failed; using built-in compaction",
