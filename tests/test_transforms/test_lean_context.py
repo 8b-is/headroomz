@@ -265,3 +265,77 @@ def test_savings_pct():
     text = "\n".join(f"line {i}" for i in range(100))
     result = lc.truncate(text)
     assert 0 < result.savings_pct < 100
+
+
+def test_no_spurious_leading_drop_marker():
+    """Long output where line 0 is retained must not insert a leading drop marker."""
+    lc = LeanContext(window_radius=5)
+    text = "\n".join(f"line {i}" for i in range(100))
+    result = lc.truncate(text)
+    output_lines = result.text.split("\n")
+    assert output_lines[0] == "line 0"
+    assert not output_lines[0].startswith("... [")
+
+
+def test_standalone_helper_does_not_inflate_proxy_stats():
+    """Standalone apply_leanctx_python calls must not add to proxy request totals."""
+    from headroom.proxy.helpers import (
+        apply_leanctx_python,
+        get_leanctx_python_stats,
+        reset_leanctx_python_stats,
+    )
+
+    reset_leanctx_python_stats()
+    text = "\n".join(f"line {i}" for i in range(200))
+    out = apply_leanctx_python(text, window_radius=10)
+    assert "... [" in out
+    stats = get_leanctx_python_stats()
+    assert stats["calls"] == 1
+    assert stats["tokens_saved"] > 0
+    assert stats["proxy_calls"] == 0
+    assert stats["proxy_tokens_saved"] == 0
+    assert stats["proxy_attempted_tokens"] == 0
+    reset_leanctx_python_stats()
+
+
+def test_apply_leanctx_to_messages_proxy_accounting():
+    """Proxy message truncation updates proxy_tokens_saved and proxy_attempted_tokens."""
+    from headroom.proxy.helpers import (
+        apply_leanctx_to_messages,
+        get_leanctx_python_stats,
+        reset_leanctx_python_stats,
+    )
+
+    reset_leanctx_python_stats()
+    long_tool_output = "\n".join(
+        ["error: compilation failed at line 50" if i == 50 else f"log line {i}" for i in range(250)]
+    )
+    messages = [
+        {"role": "user", "content": "Run the build"},
+        {
+            "role": "user",
+            "content": [
+                {
+                    "type": "tool_result",
+                    "tool_use_id": "toolu_123",
+                    "content": long_tool_output,
+                }
+            ],
+        },
+        {"role": "tool", "tool_call_id": "call_456", "content": long_tool_output},
+    ]
+
+    updated, dropped = apply_leanctx_to_messages(
+        messages, window_radius=10, record_proxy_stats=True
+    )
+    assert dropped > 0
+    assert updated is not messages
+    assert "error: compilation failed at line 50" in updated[1]["content"][0]["content"]
+    assert "... [" in updated[1]["content"][0]["content"]
+    assert "... [" in updated[2]["content"]
+
+    stats = get_leanctx_python_stats()
+    assert stats["proxy_calls"] == 2
+    assert stats["proxy_lines_dropped"] == dropped
+    assert 0 < stats["proxy_tokens_saved"] <= stats["proxy_attempted_tokens"]
+    reset_leanctx_python_stats()

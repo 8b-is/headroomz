@@ -147,7 +147,7 @@ class LeanContext:
 
         # Insert truncation markers where lines were dropped
         result_lines = []
-        prev_kept = -2
+        prev_kept = -1
         for i in sorted(keep):
             if i > prev_kept + 1:
                 skipped = i - prev_kept - 1

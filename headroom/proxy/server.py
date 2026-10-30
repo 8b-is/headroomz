@@ -4923,11 +4923,17 @@ def create_app(config: ProxyConfig | None = None) -> FastAPI:
         prefix_cache_stats = build_prefix_cache_stats(m, proxy.cost_tracker)
 
         # LeanContext is an in-process layer, so its counters are read without
-        # reviving the retired external CLI-context-tool polling path.
+        # reviving the retired external CLI-context-tool polling path. Only
+        # proxy-attributed truncations (`proxy_tokens_saved` /
+        # `proxy_attempted_tokens`) enter proxy-wide savings and active
+        # compression denominators.
+        from headroom.proxy.coalescer import get_coalescer_stats
         from headroom.proxy.helpers import get_leanctx_python_stats
 
         leanctx_py_stats = get_leanctx_python_stats()
-        leanctx_tokens_saved = int(leanctx_py_stats.get("tokens_saved", 0) or 0)
+        leanctx_tokens_saved = int(leanctx_py_stats.get("proxy_tokens_saved", 0) or 0)
+        leanctx_attempted_tokens = int(leanctx_py_stats.get("proxy_attempted_tokens", 0) or 0)
+        coalescer_stats = get_coalescer_stats()
 
         # Calculate total tokens before Headroom-side reduction.
         proxy_compression_tokens = m.tokens_saved_total
@@ -5164,6 +5170,7 @@ def create_app(config: ProxyConfig | None = None) -> FastAPI:
                     "lean_context": {
                         **leanctx_py_stats,
                         "tokens": leanctx_tokens_saved,
+                        "request_coalescer": coalescer_stats,
                         "description": (
                             "Tokens removed by the in-process LeanContext window truncator."
                         ),
@@ -5229,10 +5236,19 @@ def create_app(config: ProxyConfig | None = None) -> FastAPI:
                 "active_savings_percent": round(
                     (
                         all_layers_tokens_saved
-                        / (attempted_input_tokens + m.tool_search_saved_total)
+                        / (
+                            attempted_input_tokens
+                            + m.tool_search_saved_total
+                            + leanctx_attempted_tokens
+                        )
                         * 100
                     )
-                    if (attempted_input_tokens + m.tool_search_saved_total) > 0
+                    if (
+                        attempted_input_tokens
+                        + m.tool_search_saved_total
+                        + leanctx_attempted_tokens
+                    )
+                    > 0
                     else 0,
                     2,
                 ),
