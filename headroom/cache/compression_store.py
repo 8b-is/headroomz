@@ -481,6 +481,23 @@ class CompressionStore:
             if existing is not None:
                 self._rebuild_heap_if_needed()
 
+        try:
+            from headroom.telemetry.hf_dataset_exporter import record_compression_trace
+
+            record_compression_trace(
+                raw_content=entry.original_content,
+                compressed_content=entry.compressed_content,
+                raw_tokens=entry.original_tokens,
+                compressed_tokens=entry.compressed_tokens,
+                transform=entry.compression_strategy or "ccr",
+                tool_name=entry.tool_name or "tool_output",
+                query_context=entry.query_context,
+                hash_key=entry.hash,
+                created_at=entry.created_at,
+            )
+        except Exception:
+            pass
+
         return hash_key
 
     def retrieve(

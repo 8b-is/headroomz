@@ -5861,6 +5861,37 @@ def create_app(config: ProxyConfig | None = None) -> FastAPI:
             ],
         }
 
+    @app.get("/v1/datasets/status", dependencies=[Depends(_require_loopback)])
+    async def hf_dataset_status():
+        """Export and summarize local 8b.HeadroomZ compression training traces."""
+        from headroom.telemetry.hf_dataset_exporter import (
+            DEFAULT_HF_DATASET_REPO,
+            export_training_dataset,
+        )
+
+        summary = export_training_dataset()
+        return {
+            "repo_id": DEFAULT_HF_DATASET_REPO,
+            "dataset_url": f"https://huggingface.co/datasets/{DEFAULT_HF_DATASET_REPO}",
+            **summary,
+        }
+
+    @app.post("/v1/datasets/push", dependencies=[Depends(_require_loopback)])
+    async def hf_dataset_push(request: Request):
+        """Export and push 8b.HeadroomZ compression training traces to Hugging Face Hub."""
+        from headroom.telemetry.hf_dataset_exporter import (
+            DEFAULT_HF_DATASET_REPO,
+            push_dataset_to_hub,
+        )
+
+        try:
+            body = await request.json()
+        except Exception:
+            body = {}
+        repo_id = str(body.get("repo_id") or DEFAULT_HF_DATASET_REPO)
+        private = bool(body.get("private", False))
+        return await asyncio.to_thread(push_dataset_to_hub, repo_id=repo_id, private=private)
+
     @app.get("/v1/feedback", dependencies=[Depends(_require_loopback)])
     async def ccr_feedback():
         """Get CCR feedback loop statistics and learned patterns.

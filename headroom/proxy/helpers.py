@@ -4856,6 +4856,20 @@ def apply_leanctx_python(
         _leanctx_python_stats["proxy_calls"] += 1
         _leanctx_python_stats["proxy_tokens_saved"] += saved_tokens
         _leanctx_python_stats["proxy_attempted_tokens"] += attempted_tokens
+        if result.dropped_lines > 0:
+            try:
+                from headroom.telemetry.hf_dataset_exporter import record_compression_trace
+
+                record_compression_trace(
+                    raw_content=text,
+                    compressed_content=result.text,
+                    raw_tokens=attempted_tokens,
+                    compressed_tokens=max(1, attempted_tokens - saved_tokens),
+                    transform="lean_context",
+                    tool_name="tool_output",
+                )
+            except Exception:
+                pass
 
     return result.text
 
