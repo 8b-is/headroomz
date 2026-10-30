@@ -74,8 +74,30 @@ def _enrich_memory_metadata(
 
     enriched = dict(metadata or {})
     scope = _scope_label(session_id, agent_id, turn_id)
-    enriched.setdefault("source_text", content)
-    enriched.setdefault("source_excerpt", content[:1000])
+    supplied_source_text = next(
+        (
+            str(val)
+            for key in ("source_text", "source_chunk", "source")
+            if isinstance((val := enriched.get(key)), str) and val.strip()
+        ),
+        None,
+    )
+    supplied_excerpt = next(
+        (
+            str(val)
+            for key in ("source_excerpt", "excerpt", "source_chunk", "source_text")
+            if isinstance((val := enriched.get(key)), str) and val.strip()
+        ),
+        None,
+    )
+    enriched.setdefault(
+        "source_text",
+        supplied_source_text if supplied_source_text is not None else content,
+    )
+    enriched.setdefault(
+        "source_excerpt",
+        (supplied_excerpt if supplied_excerpt is not None else content)[:1000],
+    )
     enriched.setdefault("confidence", _confidence_from_importance(importance))
     enriched.setdefault(
         "promotion_rationale",
@@ -400,11 +422,20 @@ class LocalBackend:
         memories_created: list[Memory] = []
 
         if facts:
+            has_caller_source = any(
+                isinstance(provided_metadata.get(key), str)
+                and str(provided_metadata.get(key)).strip()
+                for key in ("source_excerpt", "excerpt", "source_chunk", "source_text")
+            )
             # Store each fact as a separate memory (like DirectMem0Adapter)
             for i, fact in enumerate(facts):
                 fact_metadata = {**base_metadata, "_fact_index": i}
-                if "source_excerpt" not in provided_metadata and "excerpt" not in provided_metadata:
-                    fact_metadata["source_excerpt"] = fact[:1000]
+                has_distinct_parent_passage = bool(
+                    content.strip() and content.strip() != fact.strip()
+                )
+                if not has_caller_source and not has_distinct_parent_passage:
+                    fact_metadata["source_excerpt"] = ""
+                    fact_metadata["source_is_synthetic"] = True
                 memory = await self._hierarchical_memory.add(
                     content=fact,
                     user_id=user_id,

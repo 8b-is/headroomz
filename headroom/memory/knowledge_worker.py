@@ -18,8 +18,8 @@ from __future__ import annotations
 import hashlib
 import re
 from collections import Counter, defaultdict, deque
-from functools import lru_cache
 from datetime import datetime, timezone
+from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
@@ -51,6 +51,31 @@ def derive_graph_db_path(db_path: str | Path) -> Path:
     return path.parent / f"{path.stem}_graph{path.suffix}"
 
 
+def _infer_project_from_db_path(db_path: str | Path | None) -> str | None:
+    """Return the project key when db_path is inside a per-project directory."""
+
+    if db_path is None:
+        return None
+    path = Path(db_path)
+    if path.parent.parent.name == "projects" and path.parent.name:
+        return path.parent.name
+    return None
+
+
+def _memory_project_keys(metadata: dict[str, Any]) -> list[str]:
+    candidates = [
+        metadata.get("workspace_key"),
+        metadata.get("workspace_display"),
+        metadata.get("project_key"),
+        metadata.get("project"),
+    ]
+    return [
+        str(candidate).strip().lower()
+        for candidate in candidates
+        if isinstance(candidate, str) and str(candidate).strip()
+    ]
+
+
 def filter_memories(
     memories: list[Memory],
     *,
@@ -58,6 +83,7 @@ def filter_memories(
     session_id: str | None = None,
     project: str | None = None,
     user_id: str | None = None,
+    db_path: str | Path | None = None,
 ) -> list[Memory]:
     """Apply the proposed project/session/global export scope."""
 
@@ -70,24 +96,32 @@ def filter_memories(
         return scoped
 
     if normalized_scope == "session":
-        if session_id:
-            return [memory for memory in scoped if memory.session_id == session_id]
-        return [memory for memory in scoped if memory.session_id]
+        if not session_id or not session_id.strip():
+            raise ValueError("session scope requires --session / session_id")
+        return [memory for memory in scoped if memory.session_id == session_id]
 
     if normalized_scope == "project":
-        if project:
+        if project and project.strip():
             return [
                 memory for memory in scoped if _metadata_matches_project(memory.metadata, project)
             ]
 
-        project_tagged = [
+        path_project = _infer_project_from_db_path(db_path)
+        if not path_project:
+            raise ValueError(
+                "project scope requires --project when the database path is not project-specific"
+            )
+
+        # In a project-specific DB path (.../projects/<project_key>/memory.db),
+        # keep rows matching that project key or untagged rows whose boundary is
+        # established by the DB path itself, while excluding rows tagged for a
+        # different workspace.
+        return [
             memory
             for memory in scoped
-            if str(memory.metadata.get("storage_mode", "")).lower() == "project"
+            if _metadata_matches_project(memory.metadata, path_project)
+            or not _memory_project_keys(memory.metadata)
         ]
-        # Project-scoped DBs often contain no per-row project metadata because
-        # the DB path itself is the boundary. In that case, include the DB.
-        return project_tagged or scoped
 
     raise ValueError(f"unknown memory export scope: {scope}")
 
@@ -99,7 +133,14 @@ async def load_memories(
 ) -> list[Memory]:
     """Load memories for audit/export."""
 
-    return await store.query(MemoryFilter(limit=100000, include_superseded=include_superseded))
+    memories = await store.query(MemoryFilter(include_superseded=include_superseded))
+    if not include_superseded:
+        memories = [
+            memory
+            for memory in memories
+            if memory.superseded_by is None and memory.valid_until is None
+        ]
+    return memories
 
 
 async def load_graph_parts(
@@ -138,10 +179,38 @@ async def build_knowledge_worker_graph(
         session_id=session_id,
         project=project,
         user_id=user_id,
+        db_path=getattr(store, "db_path", None),
     )
     memories_by_id = {memory.id: memory for memory in memories}
     selected_user_ids = {memory.user_id for memory in memories}
-    entities, relationships = await load_graph_parts(graph_store, selected_user_ids)
+    raw_entities, raw_relationships = await load_graph_parts(graph_store, selected_user_ids)
+
+    relationships = [
+        relationship
+        for relationship in raw_relationships
+        if str(relationship.metadata.get("source_memory_id", "")) in memories_by_id
+    ]
+    referenced_entity_ids: set[str] = set()
+    fallback_entity_source_memory: dict[str, Memory] = {}
+    for relationship in relationships:
+        rel_source_memory = memories_by_id[str(relationship.metadata.get("source_memory_id", ""))]
+        referenced_entity_ids.add(relationship.source_id)
+        referenced_entity_ids.add(relationship.target_id)
+        fallback_entity_source_memory.setdefault(relationship.source_id, rel_source_memory)
+        fallback_entity_source_memory.setdefault(relationship.target_id, rel_source_memory)
+
+    referenced_entity_names: set[tuple[str, str]] = {
+        (memory.user_id, entity_name.lower())
+        for memory in memories
+        for entity_name in memory.entity_refs
+    }
+    entities = [
+        entity
+        for entity in raw_entities
+        if str(entity.metadata.get("source_memory_id", "")) in memories_by_id
+        or entity.id in referenced_entity_ids
+        or (entity.user_id, entity.name.lower()) in referenced_entity_names
+    ]
 
     nodes: dict[str, dict[str, Any]] = {}
     edges: list[dict[str, Any]] = []
@@ -176,13 +245,35 @@ async def build_knowledge_worker_graph(
             seen_edges.add(key)
             edges.append(record)
 
+    for entity in entities:
+        kw_id = _entity_node_id(entity)
+        entity_id_to_kw[entity.id] = kw_id
+        entity_name_to_kw[(entity.user_id, entity.name.lower())] = kw_id
+        source_memory = memories_by_id.get(
+            str(entity.metadata.get("source_memory_id", ""))
+        ) or fallback_entity_source_memory.get(entity.id)
+        confidence = _metadata_confidence(entity.metadata) or (
+            _memory_confidence(source_memory) if source_memory else "medium"
+        )
+        add_node(
+            {
+                "id": kw_id,
+                "type": _kw_node_type(entity.entity_type),
+                "label": entity.name,
+                "body": entity.description or "",
+                "confidence": confidence,
+                "created_at": _iso(entity.created_at),
+                "headroom_entity_id": entity.id,
+                "headroom_entity_type": entity.entity_type,
+            }
+        )
+
     for memory in memories:
         source_id = _source_node_id(memory)
         confidence = _memory_confidence(memory)
         excerpt = _memory_excerpt(memory)
         source_text = _memory_source_text(memory)
         claim_id = _memory_claim_node_id(memory)
-        created_iso = _iso(memory.created_at)
 
         add_node(
             {
@@ -227,17 +318,21 @@ async def build_knowledge_worker_graph(
         )
 
         for entity_name in memory.entity_refs:
-            entity_kw_id = _entity_ref_node_id(entity_name)
-            add_node(
-                {
-                    "id": entity_kw_id,
-                    "type": "topic",
-                    "label": entity_name,
-                    "body": "",
-                    "confidence": confidence,
-                    "created_at": _iso(memory.created_at),
-                }
-            )
+            entity_key = (memory.user_id, entity_name.lower())
+            entity_kw_id = entity_name_to_kw.get(entity_key)
+            if entity_kw_id is None:
+                entity_kw_id = _entity_ref_node_id(entity_name)
+                entity_name_to_kw[entity_key] = entity_kw_id
+                add_node(
+                    {
+                        "id": entity_kw_id,
+                        "type": "topic",
+                        "label": entity_name,
+                        "body": "",
+                        "confidence": confidence,
+                        "created_at": _iso(memory.created_at),
+                    }
+                )
             add_edge(
                 {
                     "src": entity_kw_id,
@@ -264,26 +359,12 @@ async def build_knowledge_worker_graph(
             )
 
     for entity in entities:
-        kw_id = _entity_node_id(entity)
-        entity_id_to_kw[entity.id] = kw_id
-        entity_name_to_kw[(entity.user_id, entity.name.lower())] = kw_id
-        source_memory = memories_by_id.get(str(entity.metadata.get("source_memory_id", "")))
-        confidence = _metadata_confidence(entity.metadata) or (
-            _memory_confidence(source_memory) if source_memory else "medium"
-        )
-        add_node(
-            {
-                "id": kw_id,
-                "type": _kw_node_type(entity.entity_type),
-                "label": entity.name,
-                "body": entity.description or "",
-                "confidence": confidence,
-                "created_at": _iso(entity.created_at),
-                "headroom_entity_id": entity.id,
-                "headroom_entity_type": entity.entity_type,
-            }
-        )
+        kw_id = entity_id_to_kw[entity.id]
+        source_memory = memories_by_id.get(
+            str(entity.metadata.get("source_memory_id", ""))
+        ) or fallback_entity_source_memory.get(entity.id)
         if source_memory:
+            confidence = _metadata_confidence(entity.metadata) or _memory_confidence(source_memory)
             source_id = _source_node_id(source_memory)
             add_edge(
                 {
@@ -298,22 +379,17 @@ async def build_knowledge_worker_graph(
                 }
             )
 
-    for memory in memories:
-        for entity_name in memory.entity_refs:
-            entity_name_to_kw.setdefault(
-                (memory.user_id, entity_name.lower()),
-                _entity_ref_node_id(entity_name),
-            )
-
     for relationship in relationships:
         src = entity_id_to_kw.get(relationship.source_id)
         dst = entity_id_to_kw.get(relationship.target_id)
         if not src or not dst:
             continue
         source_memory = memories_by_id.get(str(relationship.metadata.get("source_memory_id", "")))
-        source_id = _source_node_id(source_memory) if source_memory else ""
-        confidence = _metadata_confidence(relationship.metadata) or (
-            _memory_confidence(source_memory) if source_memory else "medium"
+        if source_memory is None:
+            continue
+        source_id = _source_node_id(source_memory)
+        confidence = _metadata_confidence(relationship.metadata) or _memory_confidence(
+            source_memory
         )
         add_edge(
             {
@@ -321,7 +397,7 @@ async def build_knowledge_worker_graph(
                 "dst": dst,
                 "type": _kw_edge_type(relationship.relation_type),
                 "source_id": source_id,
-                "excerpt": _memory_excerpt(source_memory) if source_memory else "",
+                "excerpt": _memory_excerpt(source_memory),
                 "confidence": confidence,
                 "created_at": _iso(relationship.created_at),
                 "last_seen": _iso(relationship.created_at),
@@ -580,6 +656,19 @@ def _memory_label(memory: Memory) -> str:
 
 
 def _memory_source_text(memory: Memory) -> str:
+    source_text = memory.metadata.get("source_text")
+    for alt_key in ("source_chunk", "source"):
+        alt_val = memory.metadata.get(alt_key)
+        if (
+            isinstance(alt_val, str)
+            and alt_val.strip()
+            and (
+                not isinstance(source_text, str)
+                or not source_text.strip()
+                or source_text == memory.content
+            )
+        ):
+            return alt_val
     for key in ("source_text", "source_chunk", "source"):
         value = memory.metadata.get(key)
         if isinstance(value, str) and value.strip():
@@ -590,10 +679,27 @@ def _memory_source_text(memory: Memory) -> str:
 def _memory_excerpt(memory: Memory | None) -> str:
     if memory is None:
         return ""
+    if memory.metadata.get("source_is_synthetic"):
+        return ""
+    source_excerpt = memory.metadata.get("source_excerpt")
+    for alt_key in ("excerpt", "source_chunk"):
+        alt_val = memory.metadata.get(alt_key)
+        if (
+            isinstance(alt_val, str)
+            and alt_val.strip()
+            and (
+                not isinstance(source_excerpt, str)
+                or not source_excerpt.strip()
+                or source_excerpt == memory.content[:1000]
+            )
+        ):
+            return alt_val[:1000]
     for key in ("source_excerpt", "excerpt", "source_chunk"):
         value = memory.metadata.get(key)
         if isinstance(value, str) and value.strip():
-            return value
+            return value[:1000]
+    if "source_excerpt" in memory.metadata and memory.metadata.get("source_excerpt") == "":
+        return ""
     return memory.content[:1000]
 
 
@@ -794,7 +900,11 @@ def _slug(value: str) -> str:
 @lru_cache(maxsize=8192)
 def _stable_suffix(value: str) -> str:
     cleaned = _slug(value)
-    return cleaned[:32] if cleaned else _short_hash(value)
+    if not cleaned:
+        return _short_hash(value)
+    if len(cleaned) <= 32 and cleaned == value.lower().strip("-"):
+        return cleaned
+    return f"{cleaned[:24]}-{_short_hash(value)}"
 
 
 @lru_cache(maxsize=8192)

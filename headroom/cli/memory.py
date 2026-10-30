@@ -1416,6 +1416,7 @@ def export_memories(
                 session_id=session_id,
                 project=project,
                 user_id=user_id,
+                db_path=db_path,
             )
             rendered = json.dumps([memory.to_dict() for memory in scoped], indent=2, default=str)
             count_label = f"{len(scoped)} memory(ies)"

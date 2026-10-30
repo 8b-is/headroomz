@@ -622,3 +622,563 @@ class TestMemoryProvenanceMetadata:
         assert metadata["source_excerpt"] == "literal quote"
         assert metadata["confidence"] == "low"
         assert metadata["promotion_rationale"] == "manual review"
+
+    def test_enrich_and_export_preserve_source_chunk_over_derived_claim(
+        self, runner: CliRunner, temp_db: str
+    ) -> None:
+        """source_chunk='Launch undecided' with content='Launch Friday' preserves source_chunk."""
+        metadata = _enrich_memory_metadata(
+            {"source_chunk": "Launch undecided"},
+            content="Launch Friday",
+            importance=0.8,
+            user_id="alice",
+            session_id="session-1",
+            agent_id=None,
+            turn_id=None,
+        )
+        assert metadata["source_text"] == "Launch undecided"
+        assert metadata["source_excerpt"] == "Launch undecided"
+
+        store = SQLiteMemoryStore(temp_db)
+        asyncio.run(
+            store.save(
+                Memory(
+                    id="mem-launch",
+                    content="Launch Friday",
+                    user_id="alice",
+                    session_id="session-1",
+                    importance=0.8,
+                    metadata={
+                        "source_chunk": "Launch undecided",
+                        "source_text": "Launch Friday",
+                        "source_excerpt": "Launch Friday",
+                    },
+                )
+            )
+        )
+
+        result = runner.invoke(
+            main,
+            [
+                "memory",
+                "export",
+                "--db-path",
+                temp_db,
+                "--format",
+                "knowledge-worker",
+                "--scope",
+                "global",
+            ],
+        )
+        assert result.exit_code == 0, result.output
+        graph = json.loads(result.output)
+        source_node = graph["nodes"]["source:headroom-memory-mem-launch"]
+        assert source_node["body"] == "Launch undecided"
+        mentioned_edges = [edge for edge in graph["edges"] if edge["type"] == "MENTIONED_IN"]
+        assert len(mentioned_edges) == 1
+        assert mentioned_edges[0]["excerpt"] == "Launch undecided"
+
+    def test_pre_extracted_facts_do_not_cite_derived_fact_as_excerpt(self, tmp_path: Path) -> None:
+        """Pre-extracted facts preserve parent passage or omit synthetic self-quotes."""
+        from types import SimpleNamespace
+
+        from headroom.memory.backends.local import LocalBackend
+        from headroom.memory.knowledge_worker import _memory_excerpt
+
+        def make_backend(db_file: Path) -> LocalBackend:
+            store = SQLiteMemoryStore(str(db_file))
+            backend = LocalBackend()
+            backend._initialized = True
+
+            async def add_to_sqlite(**kwargs: object) -> Memory:
+                mem = Memory(
+                    id=f"fact-{kwargs.get('user_id')}",
+                    content=str(kwargs["content"]),
+                    user_id=str(kwargs["user_id"]),
+                    session_id=kwargs.get("session_id"),  # type: ignore[arg-type]
+                    agent_id=kwargs.get("agent_id"),  # type: ignore[arg-type]
+                    turn_id=kwargs.get("turn_id"),  # type: ignore[arg-type]
+                    importance=float(kwargs.get("importance", 0.5)),  # type: ignore[arg-type]
+                    entity_refs=list(kwargs.get("entity_refs") or []),  # type: ignore[arg-type]
+                    metadata=dict(kwargs.get("metadata") or {}),  # type: ignore[arg-type]
+                )
+                await store.save(mem)
+                return mem
+
+            backend._hierarchical_memory = SimpleNamespace(add=add_to_sqlite)  # type: ignore[assignment]
+            backend._graph = SimpleNamespace()  # type: ignore[assignment]
+            return backend
+
+        backend_passage = make_backend(tmp_path / "passage.db")
+        saved_from_passage = asyncio.run(
+            backend_passage.save_memory(
+                content="Meeting transcript: Launch undecided until Q3.",
+                user_id="alice",
+                importance=0.8,
+                facts=["Launch Friday"],
+            )
+        )
+        assert (
+            saved_from_passage.metadata["source_text"]
+            == "Meeting transcript: Launch undecided until Q3."
+        )
+        assert (
+            saved_from_passage.metadata["source_excerpt"]
+            == "Meeting transcript: Launch undecided until Q3."
+        )
+        assert (
+            _memory_excerpt(saved_from_passage) == "Meeting transcript: Launch undecided until Q3."
+        )
+
+        backend_synthetic = make_backend(tmp_path / "synthetic.db")
+        saved_synthetic = asyncio.run(
+            backend_synthetic.save_memory(
+                content="Launch Friday",
+                user_id="alice",
+                importance=0.8,
+                facts=["Launch Friday"],
+            )
+        )
+        assert saved_synthetic.metadata["source_excerpt"] == ""
+        assert saved_synthetic.metadata.get("source_is_synthetic") is True
+        assert _memory_excerpt(saved_synthetic) == ""
+
+
+class TestKnowledgeWorkerScopeAndGraphBoundaries:
+    """Focused regression tests for PR #1586 export/audit review findings."""
+
+    def test_load_memories_uses_unbounded_filter(self, temp_db: str) -> None:
+        """load_memories must not cap queries at 100,000 before scope filtering."""
+        from headroom.memory.knowledge_worker import load_memories
+        from headroom.memory.ports import MemoryFilter
+
+        store = SQLiteMemoryStore(temp_db)
+        captured_filters: list[MemoryFilter] = []
+        original_query = store.query
+
+        async def spy_query(filter_obj: MemoryFilter) -> list[Memory]:
+            captured_filters.append(filter_obj)
+            return await original_query(filter_obj)
+
+        store.query = spy_query  # type: ignore[method-assign]
+        asyncio.run(load_memories(store, include_superseded=False))
+
+        assert len(captured_filters) == 1
+        assert captured_filters[0].limit is None
+        assert captured_filters[0].include_superseded is False
+
+    def test_project_scope_rejects_mixed_workspaces_and_supports_per_project_db(
+        self, runner: CliRunner, tmp_path: Path
+    ) -> None:
+        """--scope project without --project rejects shared DBs but works on per-project DB paths."""
+        shared_db = str(tmp_path / "shared_memory.db")
+        store = SQLiteMemoryStore(shared_db)
+        asyncio.run(
+            store.save(
+                Memory(
+                    id="alpha-mem",
+                    content="Alpha workspace architecture note",
+                    user_id="alice",
+                    importance=0.8,
+                    metadata={"storage_mode": "project", "workspace_key": "alpha"},
+                )
+            )
+        )
+        asyncio.run(
+            store.save(
+                Memory(
+                    id="beta-mem",
+                    content="Beta workspace secret roadmap",
+                    user_id="alice",
+                    importance=0.8,
+                    metadata={"storage_mode": "project", "workspace_key": "beta"},
+                )
+            )
+        )
+
+        # Shared DB without --project must fail instead of mixing alpha + beta
+        unscoped_project = runner.invoke(
+            main,
+            [
+                "memory",
+                "export",
+                "--db-path",
+                shared_db,
+                "--format",
+                "knowledge-worker",
+                "--scope",
+                "project",
+            ],
+        )
+        assert unscoped_project.exit_code != 0
+        assert "project scope requires --project" in unscoped_project.output
+
+        # Shared DB with explicit --project alpha exports only alpha
+        explicit_alpha = runner.invoke(
+            main,
+            [
+                "memory",
+                "export",
+                "--db-path",
+                shared_db,
+                "--format",
+                "knowledge-worker",
+                "--scope",
+                "project",
+                "--project",
+                "alpha",
+            ],
+        )
+        assert explicit_alpha.exit_code == 0, explicit_alpha.output
+        alpha_graph = json.loads(explicit_alpha.output)
+        assert alpha_graph["_meta"]["memory_count"] == 1
+        assert "Alpha workspace architecture note" in explicit_alpha.output
+        assert "Beta workspace secret roadmap" not in explicit_alpha.output
+
+        # Per-project DB path (.../projects/alpha/memory.db) infers project key without --project
+        per_project_dir = tmp_path / "projects" / "alpha"
+        per_project_dir.mkdir(parents=True)
+        per_project_db = str(per_project_dir / "memory.db")
+        per_project_store = SQLiteMemoryStore(per_project_db)
+        asyncio.run(
+            per_project_store.save(
+                Memory(
+                    id="per-proj-mem",
+                    content="Per-project DB memory",
+                    user_id="alice",
+                    importance=0.8,
+                )
+            )
+        )
+        inferred_result = runner.invoke(
+            main,
+            [
+                "memory",
+                "export",
+                "--db-path",
+                per_project_db,
+                "--format",
+                "knowledge-worker",
+                "--scope",
+                "project",
+            ],
+        )
+        assert inferred_result.exit_code == 0, inferred_result.output
+        inferred_graph = json.loads(inferred_result.output)
+        assert inferred_graph["_meta"]["memory_count"] == 1
+
+    def test_session_scope_requires_session_and_isolates_graph_entities(
+        self, runner: CliRunner, temp_db: str
+    ) -> None:
+        """--scope session requires --session and excludes other sessions' graph entities/edges."""
+        from headroom.cli.memory import derive_graph_db_path
+        from headroom.memory.adapters.graph_models import Entity, Relationship
+        from headroom.memory.adapters.sqlite_graph import SQLiteGraphStore
+
+        store = SQLiteMemoryStore(temp_db)
+        graph_store = SQLiteGraphStore(derive_graph_db_path(temp_db))
+
+        asyncio.run(
+            store.save(
+                Memory(
+                    id="sess-a-mem",
+                    content="Session A discusses Project Orion",
+                    user_id="alice",
+                    session_id="session-a",
+                    importance=0.8,
+                )
+            )
+        )
+        asyncio.run(
+            store.save(
+                Memory(
+                    id="sess-b-mem",
+                    content="Session B discusses Project Nova",
+                    user_id="alice",
+                    session_id="session-b",
+                    importance=0.8,
+                )
+            )
+        )
+        asyncio.run(
+            graph_store.add_entity(
+                Entity(
+                    id="ent-orion",
+                    user_id="alice",
+                    name="Project Orion",
+                    entity_type="project",
+                    metadata={"source_memory_id": "sess-a-mem"},
+                )
+            )
+        )
+        asyncio.run(
+            graph_store.add_entity(
+                Entity(
+                    id="ent-nova",
+                    user_id="alice",
+                    name="Project Nova",
+                    entity_type="project",
+                    metadata={"source_memory_id": "sess-b-mem"},
+                )
+            )
+        )
+        asyncio.run(
+            graph_store.add_relationship(
+                Relationship(
+                    id="rel-cross",
+                    user_id="alice",
+                    source_id="ent-orion",
+                    target_id="ent-nova",
+                    relation_type="depends_on",
+                    metadata={"source_memory_id": "sess-b-mem"},
+                )
+            )
+        )
+
+        missing_session = runner.invoke(
+            main,
+            [
+                "memory",
+                "export",
+                "--db-path",
+                temp_db,
+                "--format",
+                "knowledge-worker",
+                "--scope",
+                "session",
+            ],
+        )
+        assert missing_session.exit_code != 0
+        assert "session scope requires --session" in missing_session.output
+
+        scoped_a = runner.invoke(
+            main,
+            [
+                "memory",
+                "export",
+                "--db-path",
+                temp_db,
+                "--format",
+                "knowledge-worker",
+                "--scope",
+                "session",
+                "--session",
+                "session-a",
+            ],
+        )
+        assert scoped_a.exit_code == 0, scoped_a.output
+        graph_a = json.loads(scoped_a.output)
+        labels = {node["label"] for node in graph_a["nodes"].values()}
+        assert "Project Orion" in labels
+        assert "Project Nova" not in labels
+        assert all(edge["type"] != "DEPENDS_ON" for edge in graph_a["edges"])
+
+    def test_relationships_exclude_superseded_and_sourceless_and_about_reuses_typed_entities(
+        self, runner: CliRunner, temp_db: str
+    ) -> None:
+        """Superseded/sourceless relationships are excluded and ABOUT edges link typed graph entities."""
+        from headroom.cli.memory import derive_graph_db_path
+        from headroom.memory.adapters.graph_models import Entity, Relationship
+        from headroom.memory.adapters.sqlite_graph import SQLiteGraphStore
+
+        store = SQLiteMemoryStore(temp_db)
+        graph_store = SQLiteGraphStore(derive_graph_db_path(temp_db))
+
+        asyncio.run(
+            store.save(
+                Memory(
+                    id="mem-superseded",
+                    content="Old claim: Alice reports to Carol",
+                    user_id="alice",
+                    importance=0.7,
+                    superseded_by="mem-active",
+                    entity_refs=["Alice", "Carol"],
+                )
+            )
+        )
+        asyncio.run(
+            store.save(
+                Memory(
+                    id="mem-active",
+                    content="Active claim: Alice leads Project Atlas",
+                    user_id="alice",
+                    importance=0.9,
+                    entity_refs=["Alice", "Project Atlas"],
+                )
+            )
+        )
+
+        asyncio.run(
+            graph_store.add_entity(
+                Entity(
+                    id="ent-alice",
+                    user_id="alice",
+                    name="Alice",
+                    entity_type="person",
+                    metadata={"source_memory_id": "mem-active"},
+                )
+            )
+        )
+        asyncio.run(
+            graph_store.add_entity(
+                Entity(
+                    id="ent-atlas",
+                    user_id="alice",
+                    name="Project Atlas",
+                    entity_type="project",
+                    metadata={"source_memory_id": "mem-active"},
+                )
+            )
+        )
+        asyncio.run(
+            graph_store.add_entity(
+                Entity(
+                    id="ent-carol",
+                    user_id="alice",
+                    name="Carol",
+                    entity_type="person",
+                    metadata={"source_memory_id": "mem-superseded"},
+                )
+            )
+        )
+        asyncio.run(
+            graph_store.add_relationship(
+                Relationship(
+                    id="rel-active",
+                    user_id="alice",
+                    source_id="ent-alice",
+                    target_id="ent-atlas",
+                    relation_type="leads",
+                    metadata={"source_memory_id": "mem-active"},
+                )
+            )
+        )
+        asyncio.run(
+            graph_store.add_relationship(
+                Relationship(
+                    id="rel-superseded",
+                    user_id="alice",
+                    source_id="ent-alice",
+                    target_id="ent-carol",
+                    relation_type="reports_to",
+                    metadata={"source_memory_id": "mem-superseded"},
+                )
+            )
+        )
+        asyncio.run(
+            graph_store.add_relationship(
+                Relationship(
+                    id="rel-sourceless",
+                    user_id="alice",
+                    source_id="ent-alice",
+                    target_id="ent-atlas",
+                    relation_type="unverified_link",
+                    metadata={},
+                )
+            )
+        )
+
+        active_export = runner.invoke(
+            main,
+            [
+                "memory",
+                "export",
+                "--db-path",
+                temp_db,
+                "--format",
+                "knowledge-worker",
+                "--scope",
+                "global",
+            ],
+        )
+        assert active_export.exit_code == 0, active_export.output
+        graph = json.loads(active_export.output)
+
+        # Typed entity IDs are used and no duplicate topic:* nodes are created for Alice / Project Atlas
+        assert "person:alice-ent-alice" in graph["nodes"]
+        assert "project:project-atlas-ent-atlas" in graph["nodes"]
+        assert not any(k.startswith("topic:alice") for k in graph["nodes"])
+        assert not any(k.startswith("topic:project-atlas") for k in graph["nodes"])
+        assert not any(k.startswith("person:carol") for k in graph["nodes"])
+
+        about_targets = {edge["dst"] for edge in graph["edges"] if edge["type"] == "ABOUT"}
+        assert about_targets == {"person:alice-ent-alice", "project:project-atlas-ent-atlas"}
+
+        rel_types = {edge["type"] for edge in graph["edges"]}
+        assert "LEADS" in rel_types
+        assert "REPORTS_TO" not in rel_types
+        assert "UNVERIFIED_LINK" not in rel_types
+        assert all(bool(edge.get("source_id")) for edge in graph["edges"])
+
+        # With --include-superseded, superseded relationship is included, sourceless still excluded
+        superseded_export = runner.invoke(
+            main,
+            [
+                "memory",
+                "export",
+                "--db-path",
+                temp_db,
+                "--format",
+                "knowledge-worker",
+                "--scope",
+                "global",
+                "--include-superseded",
+            ],
+        )
+        assert superseded_export.exit_code == 0, superseded_export.output
+        full_graph = json.loads(superseded_export.output)
+        full_rel_types = {edge["type"] for edge in full_graph["edges"]}
+        assert "REPORTS_TO" in full_rel_types
+        assert "UNVERIFIED_LINK" not in full_rel_types
+        assert all(bool(edge.get("source_id")) for edge in full_graph["edges"])
+
+    def test_long_ids_with_shared_32_char_prefix_do_not_collide(
+        self, runner: CliRunner, temp_db: str
+    ) -> None:
+        """Distinct IDs longer than 32 characters with a shared prefix produce distinct nodes."""
+        store = SQLiteMemoryStore(temp_db)
+        shared_prefix = "shared-memory-identifier-prefix-000000"
+        asyncio.run(
+            store.save(
+                Memory(
+                    id=f"{shared_prefix}-first-record",
+                    content="First long-ID memory claim",
+                    user_id="alice",
+                    importance=0.8,
+                )
+            )
+        )
+        asyncio.run(
+            store.save(
+                Memory(
+                    id=f"{shared_prefix}-second-record",
+                    content="Second long-ID memory claim",
+                    user_id="alice",
+                    importance=0.8,
+                )
+            )
+        )
+
+        result = runner.invoke(
+            main,
+            [
+                "memory",
+                "export",
+                "--db-path",
+                temp_db,
+                "--format",
+                "knowledge-worker",
+                "--scope",
+                "global",
+            ],
+        )
+        assert result.exit_code == 0, result.output
+        graph = json.loads(result.output)
+        source_nodes = [
+            node_id for node_id, node in graph["nodes"].items() if node["type"] == "source"
+        ]
+        claim_nodes = [
+            node_id for node_id, node in graph["nodes"].items() if node["type"] != "source"
+        ]
+        assert len(source_nodes) == 2
+        assert len(claim_nodes) == 2
