@@ -128,6 +128,28 @@ def build_training_record(
         else dt.datetime.now(tz=dt.timezone.utc).isoformat()
     )
 
+    from headroom.telemetry.iroh_mesh import get_iroh_mesh_node
+    from headroom.transforms.moe_optimizer import (
+        ExpertId,
+        build_projection_certificate,
+        get_moe_optimizer,
+    )
+
+    moe = get_moe_optimizer()
+    decision = moe.gating.route(clean_raw)
+    primary_exp = decision.top_experts[0][0]
+    secondary_exp = decision.top_experts[1][0] if len(decision.top_experts) > 1 else None
+    cert = build_projection_certificate(
+        primary_exp if isinstance(primary_exp, ExpertId) else ExpertId(primary_exp),
+        lossless=(tokens_saved == 0),
+    ).to_dict()
+    iroh_blob = get_iroh_mesh_node().publish_blob(
+        clean_compressed,
+        kind=f"hf_trace:{transform}",
+        expert=primary_exp.value,
+        tokens_saved=tokens_saved,
+    )
+
     return {
         "id": record_id,
         "timestamp": ts,
@@ -143,13 +165,23 @@ def build_training_record(
         "compression_ratio": compression_ratio,
         "raw_chars": len(clean_raw),
         "compressed_chars": len(clean_compressed),
+        "moe_primary_expert": primary_exp.value,
+        "moe_secondary_expert": secondary_exp.value if secondary_exp else None,
+        "moe_expert_weights": decision.all_probabilities,
+        "moe_features": decision.features.to_dict(),
+        "projection_certificate": cert,
+        "iroh_ticket": iroh_blob["ticket"],
+        "iroh_blake3_hash": iroh_blob["content_hash"],
         "raw_content": clean_raw,
         "compressed_content": clean_compressed,
         "sft_messages": [
             {"role": "system", "content": SFT_SYSTEM_PROMPT},
             {
                 "role": "user",
-                "content": f"[tool={tool_name or 'tool_output'} transform={transform}]\n{clean_raw}",
+                "content": (
+                    f"[tool={tool_name or 'tool_output'} transform={transform} "
+                    f"expert={primary_exp.value} pi={cert['projection_operator']}]\n{clean_raw}"
+                ),
             },
             {"role": "assistant", "content": clean_compressed},
         ],
@@ -387,6 +419,82 @@ def _generate_live_compressor_traces() -> list[dict[str, Any]]:
     if rec:
         records.append(rec)
 
+    # 7. MOEOptimizer tabular_expert: large Markdown SQL cluster telemetry table (crush-dev-local)
+    from headroom.transforms.moe_optimizer import get_moe_optimizer
+
+    moe = get_moe_optimizer()
+    table_lines = [
+        "| shard_id | host | region | p99_ms | status | error_detail |",
+        "| --- | --- | --- | --- | --- | --- |",
+    ]
+    for i in range(1, 95):
+        if i == 47:
+            table_lines.append(
+                "| shard_047 | hel1-cx53 | eu-north | 4912 | CRITICAL_ERROR | pgvector index lock timeout |"
+            )
+        else:
+            table_lines.append(
+                f"| shard_{i:03d} | fsn1-node-{i % 8} | eu-central | {11 + (i % 6)} | nominal | none |"
+            )
+    raw_table = "\n".join(table_lines)
+    moe_tab = moe.optimize(raw_table)
+    rec = build_training_record(
+        raw_content=raw_table,
+        compressed_content=moe_tab.text,
+        raw_tokens=moe_tab.original_tokens,
+        compressed_tokens=moe_tab.compressed_tokens,
+        transform="moe_optimizer:tabular_expert",
+        tool_name="mcp:postgres_query_shards",
+        agent="crush-dev-local",
+        content_type="markdown_table",
+        query_context="Identify which PostgreSQL shard has a p99 latency spike",
+    )
+    if rec:
+        records.append(rec)
+
+    # 8. MOEOptimizer code_skeleton_expert: Rust source module skeletonization (opencode)
+    rust_src_lines = [
+        "use serde::{Deserialize, Serialize};",
+        "use std::collections::BTreeMap;",
+        "",
+        "pub struct SovereignRouter {",
+        "    pub top_k: usize,",
+        "    pub weights: [[f32; 7]; 6],",
+        "}",
+        "",
+        "impl SovereignRouter {",
+        "    pub fn new(top_k: usize) -> Self {",
+    ]
+    for i in range(1, 80):
+        rust_src_lines.append(f"        let internal_step_{i} = ({i}usize * 3) ^ 0x5a;")
+    rust_src_lines.extend(
+        [
+            "        Self { top_k, weights: [[0.0; 7]; 6] }",
+            "    }",
+            "",
+            "    pub fn verify_certificate(&self, input: &str) -> Result<bool, String> {",
+            '        if input.is_empty() { return Err("error: empty projection domain".into()); }',
+            "        Ok(true)",
+            "    }",
+            "}",
+        ]
+    )
+    raw_rust_src = "\n".join(rust_src_lines)
+    moe_code = moe.optimize(raw_rust_src)
+    rec = build_training_record(
+        raw_content=raw_rust_src,
+        compressed_content=moe_code.text,
+        raw_tokens=moe_code.original_tokens,
+        compressed_tokens=moe_code.compressed_tokens,
+        transform="moe_optimizer:code_skeleton_expert",
+        tool_name="read_file:router.rs",
+        agent="opencode",
+        content_type="source_code",
+        query_context="Inspect public API signatures of SovereignRouter",
+    )
+    if rec:
+        records.append(rec)
+
     return records
 
 
@@ -442,6 +550,21 @@ def export_training_dataset(output_dir: Path | None = None) -> dict[str, Any]:
                 try:
                     rec = json.loads(line)
                     if isinstance(rec, dict) and "id" in rec:
+                        if "projection_certificate" not in rec and "raw_content" in rec:
+                            upgraded = build_training_record(
+                                raw_content=str(rec.get("raw_content", "")),
+                                compressed_content=str(rec.get("compressed_content", "")),
+                                raw_tokens=int(rec.get("raw_tokens", 0)),
+                                compressed_tokens=int(rec.get("compressed_tokens", 0)),
+                                transform=str(rec.get("transform", "ccr")),
+                                tool_name=str(rec.get("tool_name", "tool_output")),
+                                agent=str(rec.get("agent", "headroomz")),
+                                content_type=str(rec.get("content_type", "tool_output")),
+                                query_context=str(rec.get("query_context", "")),
+                                hash_key=str(rec["id"]),
+                            )
+                            if upgraded is not None:
+                                rec = upgraded
                         deduped[str(rec["id"])] = rec
                 except Exception:
                     continue
@@ -523,6 +646,10 @@ language:
 tags:
   - headroomz
   - context-compression
+  - moe-optimizer
+  - sufficient-projections
+  - burn
+  - iroh
   - tool-output-truncation
   - lean-context
   - smart-crusher
@@ -531,14 +658,14 @@ tags:
   - opencode
   - crush
   - codewhale
-pretty_name: 8b.HeadroomZ Raw + Compressed Tool Output Training Traces
+pretty_name: 8b.HeadroomZ Raw + Compressed Tool Output Training Traces (MOEOptimizer + Sufficient Projections)
 size_categories:
   - n<1K
 ---
 
 # 8b.HeadroomZ — Raw + Compressed Tool Output Training Traces (`PeetPedro/headroomz-compression-traces`)
 
-Curated and live-streamed `(raw_content, compressed_content, sft_messages)` pairs captured from **[8b-is/headroomz](https://github.com/8b-is/headroomz)** across first-class coding harnesses (**`opencode`**, **`crush`**, **`crush-dev-local`**, **`codewhale`**, **`claude`**, and **`codex`**).
+Curated and live-streamed `(raw_content, compressed_content, projection_certificate, sft_messages)` pairs captured from **[8b-is/headroomz](https://github.com/8b-is/headroomz)** across first-class coding harnesses (**`opencode`**, **`crush`**, **`crush-dev-local`**, **`codewhale`**, **`claude`**, and **`codex`**).
 
 ## Dataset Summary
 
@@ -547,11 +674,13 @@ Curated and live-streamed `(raw_content, compressed_content, sft_messages)` pair
 - **Total Compressed Tokens**: `{total_comp_tokens:,}`
 - **Total Tokens Saved**: `{total_saved_tokens:,}` (`{avg_savings_pct}%` average reduction)
 - **TOIN Learned Tool Signatures**: `{len(toin_patterns)}`
-- **Transforms Covered**: `lean_context` (signal-window truncation), `smart_crusher` (statistical JSON array & anomaly preservation), `ccr` (reversible Compress-Cache-Retrieve), `log_compressor`, `code_compressor`
+- **MOEOptimizer Specialist Routing (`tracel-ai/burn` `Linear[6,7]`)**: `lean_signal_expert`, `diff_hunk_expert`, `json_schema_expert`, `log_dedup_expert`, `tabular_expert`, `code_skeleton_expert`
+- **Formal Sufficiency Certificates `(π, V_π, R_π)`**: Every row includes a `projection_certificate` specifying the projection operator `π`, retained subspace `V_π`, admissible revision class `R_π`, complementary re-grounding class `R \\ R_π` (`ccr://headroom_retrieve`), and Monotone Kernel Growth Guard (`ker π_n ⊆ ker(π_{{n+1}} ∘ π_n)`).
+- **Content-Addressed P2P Swarm (`n0-computer/iroh`)**: Every row is stamped with its BLAKE3 content-addressed `iroh_ticket` (`bloba...`) and `iroh_blake3_hash`.
 
 ## Schema (`data/train.jsonl`)
 
-Each row contains both the raw/compressed strings and a ready-to-train ShareGPT / OpenAI-format `sft_messages` array:
+Each row contains the raw/compressed strings, MOEOptimizer routing tensor metadata, formal Revision-Sensitive Projection Certificate `(π, V_π, R_π)`, Iroh BLAKE3 ticket, and a ready-to-train ShareGPT / OpenAI-format `sft_messages` array:
 
 | Field | Type | Description |
 |---|---|---|
@@ -559,12 +688,19 @@ Each row contains both the raw/compressed strings and a ready-to-train ShareGPT 
 | `timestamp` | `string` | ISO-8601 UTC capture timestamp |
 | `agent` | `string` | Originating agent harness (`opencode`, `crush`, `crush-dev-local`, `codewhale`, `claude`, `codex`) |
 | `tool_name` | `string` | Tool or command identifier (e.g. `bash:cargo_build`, `bash:pytest`, `mcp:query_production_events`) |
-| `transform` | `string` | Compression layer (`lean_context`, `smart_crusher`, `ccr`) |
-| `content_type` | `string` | `build_log`, `traceback`, `git_diff`, `json_array`, `tool_output` |
+| `transform` | `string` | Compression layer (`moe_optimizer:*`, `lean_context`, `smart_crusher`, `ccr`) |
+| `content_type` | `string` | `build_log`, `traceback`, `git_diff`, `json_array`, `markdown_table`, `source_code`, `tool_output` |
 | `raw_tokens` | `int` | Token count before compression |
 | `compressed_tokens` | `int` | Token count after compression |
 | `tokens_saved` | `int` | Tokens removed while preserving all error/diagnostic signals |
 | `savings_pct` | `float` | Percentage token reduction (`0-100`) |
+| `moe_primary_expert` | `string` | Top-1 specialist expert selected by `BurnMoeGatingRouter` |
+| `moe_secondary_expert` | `string` | Top-2 specialist expert selected by `BurnMoeGatingRouter` |
+| `moe_expert_weights` | `dict` | Softmax routing distribution across all 6 experts |
+| `moe_features` | `dict` | 7D structural density vector (`json_density`, `tabular_density`, `error_signal_density`, `diff_patch_density`, `log_repetition_density`, `code_ast_density`, `prose_entropy`) |
+| `projection_certificate` | `dict` | Formal `(π, V_π, R_π)` sufficiency certificate (`projection_operator`, `retained_subspace`, `admissible_revisions`, `regrounding_required_for`, `monotone_kernel_guard`, `bennett_reversible_handle`) |
+| `iroh_ticket` | `string` | `n0-computer/iroh` BLAKE3 content-addressed blob ticket (`bloba...`) |
+| `iroh_blake3_hash` | `string` | 64-hex BLAKE3 digest of compressed payload |
 | `raw_content` | `string` | Sanitized original uncompressed tool output |
 | `compressed_content` | `string` | Sanitized compressed / signal-windowed tool output |
 | `sft_messages` | `list[dict]` | `[system, user, assistant]` chat messages for SFT / MLX / QLoRA fine-tuning |
