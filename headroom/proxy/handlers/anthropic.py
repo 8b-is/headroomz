@@ -1388,9 +1388,11 @@ class AnthropicHandlerMixin:
                 _strip_internal_headers,
                 apply_keep_last_turns,
                 apply_leanctx_to_messages,
+                apply_moe_to_messages,
                 leanctx_enabled,
                 log_outbound_headers,
                 merge_extra_headers,
+                moe_optimizer_enabled,
             )
 
             _pre_strip_count = sum(1 for k in headers if k.lower().startswith("x-headroom-"))
@@ -1740,6 +1742,25 @@ class AnthropicHandlerMixin:
             transforms_applied = []
             if _leanctx_dropped_lines > 0:
                 transforms_applied.append(f"lean_context:{_leanctx_dropped_lines}_lines_dropped")
+
+            # Sparse Mixture-of-Experts (MOEOptimizer) specialist routing
+            if not _bypass and moe_optimizer_enabled(request.headers):
+                messages, _moe_dropped, _moe_expert = apply_moe_to_messages(
+                    messages,
+                    record_proxy_stats=True,
+                )
+                if _moe_dropped > 0:
+                    body["messages"] = messages
+                    body_mutation_tracker.mark_mutated("moe_optimizer")
+                    transforms_applied.append(
+                        f"moe_optimizer:{_moe_expert}:{_moe_dropped}_lines_dropped"
+                    )
+                    logger.info(
+                        "[%s] moe_optimizer(%s): dropped %d lines from tool outputs",
+                        request_id,
+                        _moe_expert,
+                        _moe_dropped,
+                    )
             pipeline_timing: dict[str, float] = {}
             waste_signals_dict: dict[str, int] | None = None
             optimized_messages = messages

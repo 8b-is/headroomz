@@ -372,6 +372,56 @@
             </div>
         </section>
 
+        <!-- MOEOptimizer (tracel-ai/burn) + Iroh (n0-computer/iroh) P2P Swarm Strip -->
+        <section class="mb-6 rounded-xl border border-[#7a5cff]/35 bg-surface/95 p-4 shadow-[0_8px_30px_rgba(7,3,18,0.45)]" data-testid="moe-burn-iroh-strip">
+            <div class="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between mb-3">
+                <div class="flex flex-wrap items-center gap-2.5">
+                    <span class="px-2 py-0.5 rounded text-[10px] font-mono uppercase tracking-wider bg-[#ffb01f]/15 text-[#ffb01f] border border-[#ffb01f]/30">MOEOptimizer · Top-K=2</span>
+                    <span class="px-2 py-0.5 rounded text-[10px] font-mono bg-[#7a5cff]/15 text-[#c04ae0] border border-[#7a5cff]/30">tracel-ai/burn · Linear[6,7]</span>
+                    <span class="px-2 py-0.5 rounded text-[10px] font-mono bg-[#1e7fff]/15 text-[#67e8f9] border border-[#1e7fff]/30"
+                          x-text="'n0-computer/iroh · ' + ((stats.savings?.by_layer?.moe_optimizer?.iroh_mesh?.node_id || 'iroh1m1headroomz').slice(0, 18)) + '…'"></span>
+                    <span class="text-xs text-[#9d93c9]"
+                          x-text="'Saved ' + formatNumber(stats.savings?.by_layer?.moe_optimizer?.tokens_saved || 0) + ' tok across ' + formatNumber(stats.savings?.by_layer?.moe_optimizer?.calls || 0) + ' MOE routes · ' + formatNumber(stats.savings?.by_layer?.moe_optimizer?.iroh_mesh?.total_blobs || 0) + ' Iroh BLAKE3 blobs'"></span>
+                </div>
+                <div class="flex items-center gap-2 shrink-0">
+                    <code class="text-[11px] font-mono text-[#9d93c9] bg-black/30 px-2 py-1 rounded border border-border"
+                          title="Content-addressed Iroh ticket for the current Burn MOE gating checkpoint"
+                          x-text="(stats.savings?.by_layer?.moe_optimizer?.iroh_mesh?.burn_checkpoint_ticket || 'bloba8bheadroomz').slice(0, 22) + '…'"></code>
+                    <button type="button"
+                            @click="fetch('/v1/iroh/gossip', {method: 'POST'}).then(() => fetchStats())"
+                            class="px-2.5 py-1 text-xs font-mono rounded-md border border-[#7a5cff]/50 bg-[#7a5cff]/20 text-[#ece9ff] hover:bg-[#7a5cff]/35 transition-colors">
+                        Sync Iroh Gossip ↻
+                    </button>
+                </div>
+            </div>
+            <div class="grid grid-cols-2 gap-2 sm:grid-cols-3 lg:grid-cols-6 text-xs font-mono">
+                <div class="rounded-lg border border-border bg-black/20 px-2.5 py-2 flex items-center justify-between">
+                    <span class="text-[#ffb01f]">lean_signal</span>
+                    <span class="text-gray-300 tabular-nums" x-text="formatNumber(stats.savings?.by_layer?.moe_optimizer?.expert_wins?.lean_signal_expert || 0)"></span>
+                </div>
+                <div class="rounded-lg border border-border bg-black/20 px-2.5 py-2 flex items-center justify-between">
+                    <span class="text-[#c04ae0]">diff_hunk</span>
+                    <span class="text-gray-300 tabular-nums" x-text="formatNumber(stats.savings?.by_layer?.moe_optimizer?.expert_wins?.diff_hunk_expert || 0)"></span>
+                </div>
+                <div class="rounded-lg border border-border bg-black/20 px-2.5 py-2 flex items-center justify-between">
+                    <span class="text-[#ffd400]">json_schema</span>
+                    <span class="text-gray-300 tabular-nums" x-text="formatNumber(stats.savings?.by_layer?.moe_optimizer?.expert_wins?.json_schema_expert || 0)"></span>
+                </div>
+                <div class="rounded-lg border border-border bg-black/20 px-2.5 py-2 flex items-center justify-between">
+                    <span class="text-[#67e8f9]">log_dedup</span>
+                    <span class="text-gray-300 tabular-nums" x-text="formatNumber(stats.savings?.by_layer?.moe_optimizer?.expert_wins?.log_dedup_expert || 0)"></span>
+                </div>
+                <div class="rounded-lg border border-border bg-black/20 px-2.5 py-2 flex items-center justify-between">
+                    <span class="text-[#6ee7b7]">tabular</span>
+                    <span class="text-gray-300 tabular-nums" x-text="formatNumber(stats.savings?.by_layer?.moe_optimizer?.expert_wins?.tabular_expert || 0)"></span>
+                </div>
+                <div class="rounded-lg border border-border bg-black/20 px-2.5 py-2 flex items-center justify-between">
+                    <span class="text-[#9d93c9]">code_skeleton</span>
+                    <span class="text-gray-300 tabular-nums" x-text="formatNumber(stats.savings?.by_layer?.moe_optimizer?.expert_wins?.code_skeleton_expert || 0)"></span>
+                </div>
+            </div>
+        </section>
+
         <!-- teams-perk:start — removed server-side when HEADROOM_LICENSE is set
              (see headroom.dashboard.get_dashboard_html). A plain link: nothing
              is fetched or reported, and dismissal stays in this browser. -->

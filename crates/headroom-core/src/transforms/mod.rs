@@ -27,6 +27,7 @@ pub mod live_zone;
 pub mod log_compressor;
 #[cfg(feature = "ml")]
 pub mod magika_detector;
+pub mod moe_optimizer;
 pub mod pipeline;
 pub mod recommendations;
 pub mod safety;
@@ -64,6 +65,9 @@ pub use log_compressor::{
 };
 #[cfg(feature = "ml")]
 pub use magika_detector::{magika_detect, map_magika_label, MagikaDetectorError};
+pub use moe_optimizer::{
+    BurnMoeGatingRouter, BurnMoeTensorState, MoeExpertId, MoeFeatureTensor, MoeRoutingDecision,
+};
 pub use pipeline::{
     CompressionContext, CompressionPipeline, CompressionPipelineBuilder, DiffNoise, DiffOffload,
     JsonMinifier, JsonOffload, LogOffload, LogTemplate, OffloadOutput, OffloadTransform,

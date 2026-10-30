@@ -8,6 +8,7 @@ pub mod auth_mode;
 pub mod cache_control;
 pub mod ccr;
 pub mod compression_policy;
+pub mod iroh_mesh;
 pub mod offline;
 #[cfg(feature = "ml")]
 mod onnx_cpu;

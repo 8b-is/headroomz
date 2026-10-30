@@ -4938,11 +4938,17 @@ def create_app(config: ProxyConfig | None = None) -> FastAPI:
         # `proxy_attempted_tokens`) enter proxy-wide savings and active
         # compression denominators.
         from headroom.proxy.coalescer import get_coalescer_stats
-        from headroom.proxy.helpers import get_leanctx_python_stats
+        from headroom.proxy.helpers import (
+            get_leanctx_python_stats,
+            get_moe_optimizer_stats,
+        )
 
         leanctx_py_stats = get_leanctx_python_stats()
         leanctx_tokens_saved = int(leanctx_py_stats.get("proxy_tokens_saved", 0) or 0)
         leanctx_attempted_tokens = int(leanctx_py_stats.get("proxy_attempted_tokens", 0) or 0)
+        moe_stats = get_moe_optimizer_stats()
+        moe_tokens_saved = int(moe_stats.get("proxy_tokens_saved", 0) or 0)
+        moe_attempted_tokens = int(moe_stats.get("proxy_attempted_tokens", 0) or 0)
         coalescer_stats = get_coalescer_stats()
 
         # Calculate total tokens before Headroom-side reduction.
@@ -4950,7 +4956,10 @@ def create_app(config: ProxyConfig | None = None) -> FastAPI:
         # "All layers" must include tool-schema deferral (the tool_search layer
         # enumerated in by_layer below) — otherwise the advertised total omits it.
         all_layers_tokens_saved = (
-            proxy_compression_tokens + m.tool_search_saved_total + leanctx_tokens_saved
+            proxy_compression_tokens
+            + m.tool_search_saved_total
+            + leanctx_tokens_saved
+            + moe_tokens_saved
         )
         total_tokens_before = m.tokens_input_total + all_layers_tokens_saved
         proxy_total_before_compression = m.tokens_input_total + proxy_compression_tokens
@@ -5185,6 +5194,14 @@ def create_app(config: ProxyConfig | None = None) -> FastAPI:
                             "Tokens removed by the in-process LeanContext window truncator."
                         ),
                     },
+                    "moe_optimizer": {
+                        **moe_stats,
+                        "tokens": moe_tokens_saved,
+                        "description": (
+                            "Tokens removed by the Sparse Top-K Mixture-of-Experts "
+                            "(MOEOptimizer · tracel-ai/burn + n0-computer/iroh) layer."
+                        ),
+                    },
                 },
             },
             "requests": {
@@ -5250,6 +5267,7 @@ def create_app(config: ProxyConfig | None = None) -> FastAPI:
                             attempted_input_tokens
                             + m.tool_search_saved_total
                             + leanctx_attempted_tokens
+                            + moe_attempted_tokens
                         )
                         * 100
                     )
@@ -5257,6 +5275,7 @@ def create_app(config: ProxyConfig | None = None) -> FastAPI:
                         attempted_input_tokens
                         + m.tool_search_saved_total
                         + leanctx_attempted_tokens
+                        + moe_attempted_tokens
                     )
                     > 0
                     else 0,
@@ -5891,6 +5910,70 @@ def create_app(config: ProxyConfig | None = None) -> FastAPI:
         repo_id = str(body.get("repo_id") or DEFAULT_HF_DATASET_REPO)
         private = bool(body.get("private", False))
         return await asyncio.to_thread(push_dataset_to_hub, repo_id=repo_id, private=private)
+
+    @app.get("/v1/moe/stats", dependencies=[Depends(_require_loopback)])
+    async def moe_optimizer_stats():
+        """Return Sparse Mixture-of-Experts (MOEOptimizer) & Burn gating metrics."""
+        from headroom.proxy.helpers import get_moe_optimizer_stats
+
+        return get_moe_optimizer_stats()
+
+    @app.post("/v1/moe/optimize", dependencies=[Depends(_require_loopback)])
+    async def moe_optimize_payload(request: Request):
+        """Route a text payload through the Burn-gated Top-K MOEOptimizer and mint an Iroh blob ticket."""
+        from headroom.telemetry.iroh_mesh import get_iroh_mesh_node
+        from headroom.transforms.moe_optimizer import get_moe_optimizer
+
+        try:
+            body = await request.json()
+        except Exception:
+            body = {}
+        text = str(body.get("text") or "")
+        record_proxy = bool(body.get("record_proxy_stats", True))
+        res = get_moe_optimizer().optimize(text, record_proxy_stats=record_proxy)
+        blob = get_iroh_mesh_node().publish_blob(
+            res.text,
+            kind="moe_api_optimize",
+            expert=res.primary_expert,
+            tokens_saved=res.tokens_saved,
+        )
+        return {
+            "primary_expert": res.primary_expert,
+            "secondary_expert": res.secondary_expert,
+            "expert_weights": res.expert_weights,
+            "features": res.features,
+            "original_lines": res.original_lines,
+            "kept_lines": res.kept_lines,
+            "dropped_lines": res.dropped_lines,
+            "original_tokens": res.original_tokens,
+            "compressed_tokens": res.compressed_tokens,
+            "tokens_saved": res.tokens_saved,
+            "savings_pct": res.savings_pct,
+            "iroh_ticket": blob["ticket"],
+            "iroh_content_hash": blob["content_hash"],
+            "text": res.text,
+        }
+
+    @app.get("/v1/iroh/status", dependencies=[Depends(_require_loopback)])
+    async def iroh_mesh_status():
+        """Return n0-computer/iroh P2P swarm node status, fleet peers, and BLAKE3 trace tickets."""
+        from headroom.telemetry.iroh_mesh import get_iroh_mesh_node
+
+        return get_iroh_mesh_node().get_status()
+
+    @app.post("/v1/iroh/gossip", dependencies=[Depends(_require_loopback)])
+    async def iroh_mesh_gossip(request: Request):
+        """Run a federated gossip round syncing Burn MOE gating biases over n0-computer/iroh."""
+        from headroom.telemetry.iroh_mesh import get_iroh_mesh_node
+
+        try:
+            body = await request.json()
+        except Exception:
+            body = {}
+        peer_override = body.get("expert_bias") if isinstance(body, dict) else None
+        return get_iroh_mesh_node().sync_moe_gossip(
+            peer_override=peer_override if isinstance(peer_override, dict) else None
+        )
 
     @app.get("/v1/feedback", dependencies=[Depends(_require_loopback)])
     async def ccr_feedback():

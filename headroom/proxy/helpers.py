@@ -5032,6 +5032,166 @@ def apply_leanctx_to_messages(
     return updated_messages, lines_dropped
 
 
+# ── MOEOptimizer (Sparse Top-K Mixture-of-Experts Layer) ─────────────
+
+
+def moe_optimizer_enabled(headers: Any = None) -> bool:
+    """Check whether MOEOptimizer is enabled via request header or environment."""
+    if headers is not None and hasattr(headers, "get"):
+        raw_hdr = str(
+            headers.get("x-headroom-moe-optimizer") or headers.get("X-Headroom-Moe-Optimizer") or ""
+        ).strip()
+        if raw_hdr.lower() in ("1", "true", "yes", "on"):
+            return True
+        if raw_hdr.lower() in ("0", "false", "no", "off"):
+            return False
+    env_val = os.environ.get("HEADROOM_MOE_OPTIMIZER", "").strip().lower()
+    return env_val in ("1", "true", "yes", "on")
+
+
+def apply_moe_optimizer(
+    text: str,
+    window_radius: int = 25,
+    *,
+    record_proxy_stats: bool = False,
+) -> str:
+    """Apply in-process Sparse Mixture-of-Experts optimization to tool output text."""
+    from headroom.transforms.moe_optimizer import get_moe_optimizer
+
+    moe = get_moe_optimizer(window_radius=window_radius)
+    result = moe.optimize(text, record_proxy_stats=record_proxy_stats)
+    if record_proxy_stats and result.dropped_lines > 0:
+        try:
+            from headroom.telemetry.hf_dataset_exporter import record_compression_trace
+            from headroom.telemetry.iroh_mesh import get_iroh_mesh_node
+
+            record_compression_trace(
+                raw_content=text,
+                compressed_content=result.text,
+                raw_tokens=result.original_tokens,
+                compressed_tokens=result.compressed_tokens,
+                transform=f"moe:{result.primary_expert}",
+                tool_name="tool_output",
+            )
+            get_iroh_mesh_node().publish_blob(
+                result.text,
+                kind="moe_compressed_trace",
+                expert=result.primary_expert,
+                tokens_saved=result.tokens_saved,
+            )
+        except Exception:
+            pass
+    return result.text
+
+
+def get_moe_optimizer_stats() -> dict[str, Any]:
+    """Return MOEOptimizer runtime statistics."""
+    from headroom.telemetry.iroh_mesh import get_iroh_mesh_node
+    from headroom.transforms.moe_optimizer import get_moe_optimizer
+
+    iroh_status = get_iroh_mesh_node().get_status()
+    return {
+        "tool": "moe-optimizer",
+        "label": "MOEOptimizer (tracel-ai/burn Top-K + n0-computer/iroh Mesh)",
+        "scope": "project",
+        **get_moe_optimizer().get_stats(),
+        "iroh_mesh": {
+            "node_id": iroh_status["node_id"],
+            "burn_checkpoint_ticket": iroh_status["burn_checkpoint_ticket"],
+            "gossip_rounds": iroh_status["gossip_rounds"],
+            "total_blobs": iroh_status["total_blobs"],
+            "peers_connected": len(iroh_status["peers"]),
+        },
+    }
+
+
+def reset_moe_optimizer_stats() -> None:
+    """Reset MOEOptimizer runtime statistics."""
+    from headroom.transforms.moe_optimizer import get_moe_optimizer
+
+    get_moe_optimizer().reset_stats()
+
+
+def apply_moe_to_messages(
+    messages: list[dict[str, Any]],
+    *,
+    window_radius: int = 25,
+    record_proxy_stats: bool = True,
+) -> tuple[list[dict[str, Any]], int, str]:
+    """Apply MOEOptimizer Top-K specialist routing to tool-output messages.
+
+    Returns ``(updated_messages, lines_dropped, primary_expert)``.
+    """
+    if not messages:
+        return messages, 0, "lean_signal_expert"
+
+    from headroom.transforms.moe_optimizer import get_moe_optimizer
+
+    moe = get_moe_optimizer(window_radius=window_radius)
+    before_stats = moe.get_stats()
+    before_dropped = int(
+        before_stats["proxy_lines_dropped" if record_proxy_stats else "lines_dropped"]
+    )
+    updated_messages: list[dict[str, Any]] = []
+    any_modified = False
+    last_expert = "lean_signal_expert"
+
+    for msg in messages:
+        if not isinstance(msg, dict):
+            updated_messages.append(msg)
+            continue
+
+        role = msg.get("role")
+        content = msg.get("content")
+
+        if role == "tool" and isinstance(content, str):
+            res = moe.optimize(content, record_proxy_stats=record_proxy_stats)
+            last_expert = res.primary_expert
+            if res.text != content:
+                any_modified = True
+                updated_messages.append({**msg, "content": res.text})
+            else:
+                updated_messages.append(msg)
+        elif role in ("user", "tool") and isinstance(content, list):
+            new_blocks: list[Any] = []
+            msg_modified = False
+            for block in content:
+                if not isinstance(block, dict):
+                    new_blocks.append(block)
+                    continue
+                btype = block.get("type")
+                if btype == "tool_result":
+                    bcontent = block.get("content")
+                    if isinstance(bcontent, str):
+                        res = moe.optimize(bcontent, record_proxy_stats=record_proxy_stats)
+                        last_expert = res.primary_expert
+                        if res.text != bcontent:
+                            msg_modified = True
+                            new_blocks.append({**block, "content": res.text})
+                        else:
+                            new_blocks.append(block)
+                    else:
+                        new_blocks.append(block)
+                else:
+                    new_blocks.append(block)
+            if msg_modified:
+                any_modified = True
+                updated_messages.append({**msg, "content": new_blocks})
+            else:
+                updated_messages.append(msg)
+        else:
+            updated_messages.append(msg)
+
+    after_stats = moe.get_stats()
+    after_dropped = int(
+        after_stats["proxy_lines_dropped" if record_proxy_stats else "lines_dropped"]
+    )
+    lines_dropped = max(0, after_dropped - before_dropped)
+    if not any_modified:
+        return messages, 0, last_expert
+    return updated_messages, lines_dropped, last_expert
+
+
 _KEEP_LAST_TURNS_INSTRUCTION_ROLES = frozenset({"system", "developer"})
 
 

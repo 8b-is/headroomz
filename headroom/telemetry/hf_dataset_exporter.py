@@ -115,9 +115,12 @@ def build_training_record(
     savings_pct = round((tokens_saved / max(1, est_raw_tokens)) * 100.0, 2)
     compression_ratio = round(est_comp_tokens / max(1, est_raw_tokens), 4)
 
-    record_id = hash_key or hashlib.sha256(
-        f"{transform}:{tool_name}:{clean_raw[:4096]}:{clean_compressed[:2048]}".encode()
-    ).hexdigest()[:24]
+    record_id = (
+        hash_key
+        or hashlib.sha256(
+            f"{transform}:{tool_name}:{clean_raw[:4096]}:{clean_compressed[:2048]}".encode()
+        ).hexdigest()[:24]
+    )
 
     ts = (
         dt.datetime.fromtimestamp(created_at, tz=dt.timezone.utc).isoformat()
@@ -267,8 +270,12 @@ def _generate_live_compressor_traces() -> list[dict[str, Any]]:
     diff_lines[36] = "+++ b/headroom/proxy/server.py"
     diff_lines[37] = "@@ -4925,6 +4925,11 @@ def get_stats_snapshot(proxy):"
     diff_lines[38] = "-        leanctx_tokens_saved = int(leanctx_py_stats.get('tokens_saved', 0))"
-    diff_lines[39] = "+        leanctx_tokens_saved = int(leanctx_py_stats.get('proxy_tokens_saved', 0))"
-    diff_lines[40] = "+        leanctx_attempted_tokens = int(leanctx_py_stats.get('proxy_attempted_tokens', 0))"
+    diff_lines[39] = (
+        "+        leanctx_tokens_saved = int(leanctx_py_stats.get('proxy_tokens_saved', 0))"
+    )
+    diff_lines[40] = (
+        "+        leanctx_attempted_tokens = int(leanctx_py_stats.get('proxy_attempted_tokens', 0))"
+    )
     diff_lines[80] = "headroom/proxy/server.py:5238: active_savings_percent denominator fix"
     raw_diff = "\n".join(diff_lines)
     comp_diff = lc.truncate(raw_diff)
@@ -383,105 +390,6 @@ def _generate_live_compressor_traces() -> list[dict[str, Any]]:
     return records
 
 
-def _harvest_local_session_tool_outputs() -> list[dict[str, Any]]:
-    """Harvest real tool_result outputs from local Headroom session logs and compress via HeadroomZ."""
-    from headroom.transforms.lean_context import LeanContext
-
-    logs_dir = Path(os.environ.get("HEADROOM_HOME", Path.home() / ".headroom")) / "logs" / "debug_400"
-    if not logs_dir.is_dir():
-        return []
-
-    lc = LeanContext(window_radius=12)
-    seen_hashes: set[str] = set()
-    harvested: list[dict[str, Any]] = []
-
-    for json_file in sorted(logs_dir.glob("*.json")):
-        try:
-            payload = json.loads(json_file.read_text(encoding="utf-8", errors="replace"))
-        except Exception:
-            continue
-        if not isinstance(payload, dict):
-            continue
-
-        headers = payload.get("headers") if isinstance(payload.get("headers"), dict) else {}
-        ua = str(headers.get("user-agent") or "claude-code").lower()
-        agent = (
-            "opencode"
-            if "opencode" in ua
-            else "crush"
-            if "crush" in ua
-            else "codewhale"
-            if "whale" in ua
-            else "codex"
-            if "codex" in ua
-            else "claude"
-        )
-
-        # Map sent tool_results by tool_use_id to capture Headroom's live pre/post diff
-        sent_by_id: dict[str, str] = {}
-        for msg in payload.get("messages_sent") or []:
-            if not isinstance(msg, dict) or not isinstance(msg.get("content"), list):
-                continue
-            for block in msg["content"]:
-                if isinstance(block, dict) and block.get("type") == "tool_result":
-                    tid = str(block.get("tool_use_id") or "")
-                    txt = block.get("content")
-                    if isinstance(txt, list):
-                        txt = "\n".join(
-                            x.get("text", "") for x in txt if isinstance(x, dict)
-                        )
-                    if tid and isinstance(txt, str):
-                        sent_by_id[tid] = txt
-
-        for msg in payload.get("original_messages") or []:
-            if not isinstance(msg, dict) or not isinstance(msg.get("content"), list):
-                continue
-            for block in msg["content"]:
-                if not isinstance(block, dict) or block.get("type") != "tool_result":
-                    continue
-                tid = str(block.get("tool_use_id") or "")
-                raw_txt = block.get("content")
-                if isinstance(raw_txt, list):
-                    raw_txt = "\n".join(
-                        x.get("text", "") for x in raw_txt if isinstance(x, dict)
-                    )
-                if not isinstance(raw_txt, str) or len(raw_txt) < 500:
-                    continue
-
-                sig = hashlib.sha256(raw_txt.encode("utf-8", errors="replace")).hexdigest()[:20]
-                if sig in seen_hashes:
-                    continue
-                seen_hashes.add(sig)
-
-                # Prefer live proxy-compressed output if it shrank; otherwise run LeanContext
-                sent_txt = sent_by_id.get(tid, "")
-                if sent_txt and sent_txt != raw_txt and len(sent_txt) + 60 < len(raw_txt):
-                    comp_txt = sent_txt
-                    transform_name = "proxy_pipeline"
-                else:
-                    lc_res = lc.truncate(raw_txt)
-                    if lc_res.dropped_lines <= 0:
-                        continue
-                    comp_txt = lc_res.text
-                    transform_name = "lean_context"
-
-                rec = build_training_record(
-                    raw_content=raw_txt,
-                    compressed_content=comp_txt,
-                    raw_tokens=len(raw_txt) // 4,
-                    compressed_tokens=len(comp_txt) // 4,
-                    transform=transform_name,
-                    tool_name="session_tool_result",
-                    agent=agent,
-                    content_type="tool_output",
-                    hash_key=f"session_{sig}",
-                )
-                if rec is not None:
-                    harvested.append(rec)
-
-    return harvested
-
-
 def _harvest_toin_patterns() -> list[dict[str, Any]]:
     """Harvest learned Tool Output Intelligence Network (TOIN) patterns from ~/.headroom/toin.json."""
     toin_path = Path(os.environ.get("HEADROOM_HOME", Path.home() / ".headroom")) / "toin.json"
@@ -501,7 +409,9 @@ def _harvest_toin_patterns() -> list[dict[str, Any]]:
             patterns_out.append(
                 {
                     "signature_hash": str(sig_hash),
-                    "Read_or_tool_type": str(pat.get("tool_type") or pat.get("tool_name") or "unknown"),
+                    "Read_or_tool_type": str(
+                        pat.get("tool_type") or pat.get("tool_name") or "unknown"
+                    ),
                     "recommended_strategy": str(pat.get("recommended_strategy") or "smart_crusher"),
                     "retrieval_rate": float(pat.get("retrieval_rate", 0.0) or 0.0),
                     "total_compressions": int(pat.get("total_compressions", 0) or 0),
@@ -561,8 +471,8 @@ def export_training_dataset(output_dir: Path | None = None) -> dict[str, Any]:
     except Exception as exc:
         logger.debug("CompressionStore harvest skipped: %s", exc)
 
-    # 3. Harvest real session tool_result outputs from ~/.headroom/logs and live compressors
-    for seed_rec in [*_harvest_local_session_tool_outputs(), *_generate_live_compressor_traces()]:
+    # 3. Ensure live multi-agent compressor traces are present and persisted
+    for seed_rec in _generate_live_compressor_traces():
         if seed_rec["id"] not in deduped:
             deduped[seed_rec["id"]] = seed_rec
             record_compression_trace(

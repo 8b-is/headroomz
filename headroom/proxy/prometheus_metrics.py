@@ -446,9 +446,13 @@ class PrometheusMetrics:
             self.attempted_input_tokens_total = 0
             try:
                 from headroom.proxy.coalescer import reset_coalescer
-                from headroom.proxy.helpers import reset_leanctx_python_stats
+                from headroom.proxy.helpers import (
+                    reset_leanctx_python_stats,
+                    reset_moe_optimizer_stats,
+                )
 
                 reset_leanctx_python_stats()
+                reset_moe_optimizer_stats()
                 reset_coalescer()
             except Exception:
                 pass
