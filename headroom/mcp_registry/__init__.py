@@ -16,6 +16,7 @@ from __future__ import annotations
 from .base import MCPRegistrar, RegisterResult, RegisterStatus, ServerSpec
 from .claude import ClaudeConfigMutationError, ClaudeRegistrar
 from .codex import CodexRegistrar
+from .crush import CrushRegistrar
 from .display import any_succeeded, format_result, format_results
 from .grok import GrokRegistrar
 from .install import (
@@ -35,6 +36,7 @@ __all__ = [
     "ClaudeConfigMutationError",
     "ClaudeRegistrar",
     "CodexRegistrar",
+    "CrushRegistrar",
     "GrokRegistrar",
     "MCPRegistrar",
     "OpencodeRegistrar",

@@ -313,7 +313,17 @@ def _append_text(path: Path, content: str) -> None:
     fsutil.append_text(path, content)
 
 
-_AGENT_SAVINGS_TARGET_AGENTS = {"claude", "codex", "cursor", "grok", "grok_build", "opencode"}
+_AGENT_SAVINGS_TARGET_AGENTS = {
+    "claude",
+    "codex",
+    "cursor",
+    "grok",
+    "grok_build",
+    "opencode",
+    "crush",
+    "crush-dev-local",
+    "codewhale",
+}
 _WRAP_PROXY_TIMEOUT_ENV = "HEADROOM_WRAP_PROXY_TIMEOUT"
 _WRAP_PROXY_TIMEOUT_DEFAULT_SECONDS = 45
 _WRAP_PROXY_TIMEOUT_ML_DEFAULT_SECONDS = 90
@@ -329,7 +339,17 @@ _WRAP_PROXY_TIMEOUT_ML_MODULES = ("torch", "sentence_transformers", "spacy")
 _TOOL_SEARCH_ENV = TOOL_SEARCH_ENV
 _TOOL_SEARCH_DEFAULT = TOOL_SEARCH_DEFAULT
 _TOOL_SEARCH_FOUNDRY_DEFAULT = TOOL_SEARCH_FOUNDRY_DEFAULT
-_AGENT_SAVINGS_WRAP_AGENTS = {"claude", "codex", "cursor", "grok", "grok_build"}
+_AGENT_SAVINGS_WRAP_AGENTS = {
+    "claude",
+    "codex",
+    "cursor",
+    "grok",
+    "grok_build",
+    "opencode",
+    "crush",
+    "crush-dev-local",
+    "codewhale",
+}
 
 # 1M context window for `wrap claude` (#1158). Claude Code only sends the
 # `context-1m` beta header — unlocking the 1M window for entitled subscription
@@ -8226,6 +8246,10 @@ def opencode(
     if not prepare_only:
         opencode_bin = shutil.which("opencode")
         if not opencode_bin:
+            fallback_opencode = Path.home() / ".opencode" / "bin" / "opencode"
+            if fallback_opencode.is_file():
+                opencode_bin = str(fallback_opencode)
+        if not opencode_bin:
             click.echo("Error: 'opencode' not found in PATH.")
             click.echo("Install OpenCode: https://opencode.ai")
             raise SystemExit(1)
@@ -8909,10 +8933,19 @@ def _make_registry_command(target: WrapTarget) -> click.Command:
             return
 
         tool_bin = shutil.which(target.binary)
+        if not tool_bin and target.name == "crush-dev-local":
+            tool_bin = shutil.which("crush-love-dev") or shutil.which("crush")
+        elif not tool_bin and target.name == "codewhale":
+            tool_bin = shutil.which("whale")
         if not tool_bin:
             click.echo(f"Error: '{target.binary}' not found in PATH.")
             click.echo(target.install_hint)
             raise SystemExit(1)
+
+        if target.name in ("crush", "crush-dev-local"):
+            from headroom.mcp_registry import CrushRegistrar
+
+            _setup_headroom_mcp(CrushRegistrar(), port, verbose=verbose, force=True)
 
         # Exported before proxy startup so _start_proxy forwards it as --mode;
         # an explicit HEADROOM_MODE always wins.

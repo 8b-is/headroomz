@@ -719,7 +719,19 @@ def _echo_installed(manifest: DeploymentManifest, *, prefix: str = "Installed pe
     "targets",
     multiple=True,
     type=click.Choice(
-        ["claude", "copilot", "codex", "aider", "cursor", "grok_build", "openclaw", "opencode"]
+        [
+            "claude",
+            "copilot",
+            "codex",
+            "aider",
+            "cursor",
+            "grok_build",
+            "openclaw",
+            "opencode",
+            "crush",
+            "crush-dev-local",
+            "codewhale",
+        ]
     ),
     help="Tool target to configure when --providers manual is used.",
 )
@@ -966,7 +978,20 @@ def install_apply(
     "--target",
     "targets",
     multiple=True,
-    type=click.Choice(["claude", "copilot", "codex", "aider", "cursor", "openclaw", "opencode"]),
+    type=click.Choice(
+        [
+            "claude",
+            "copilot",
+            "codex",
+            "aider",
+            "cursor",
+            "openclaw",
+            "opencode",
+            "crush",
+            "crush-dev-local",
+            "codewhale",
+        ]
+    ),
     help="Tool target to configure when --providers manual is used.",
 )
 @click.option("--memory", is_flag=True, help="Enable persistent memory in the proxy runtime.")

@@ -280,6 +280,80 @@ WRAP_TARGETS: dict[str, WrapTarget] = {
                 "    headroom wrap openclaude -- --model gpt-4o       # Pass args to openclaude"
             ),
         ),
+        WrapTarget(
+            name="crush",
+            binary="crush",
+            install_hint="Install Charmbracelet Crush: brew install charmbracelet/tap/crush",
+            env_vars=(
+                EnvVar("OPENAI_BASE_URL", "openai_v1"),
+                EnvVar("OPENAI_API_BASE", "openai_v1", display=False),
+                EnvVar("ANTHROPIC_BASE_URL", "anthropic"),
+                EnvVar("OPENROUTER_BASE_URL", "openai_v1", display=False),
+                EnvVar("DEEPSEEK_BASE_URL", "openai_v1", display=False),
+            ),
+            help_text=(
+                "Launch Crush (8b.is / Charmbracelet terminal coding agent) through HeadroomZ proxy.\n"
+                "\n"
+                "\b\n"
+                "Sets OPENAI_BASE_URL, ANTHROPIC_BASE_URL, OPENROUTER_BASE_URL, and\n"
+                "DEEPSEEK_BASE_URL to route Crush's API calls through HeadroomZ.\n"
+                "\n"
+                "\b\n"
+                "Examples:\n"
+                "    headroom wrap crush                              # Start proxy + crush\n"
+                "    headroom wrap crush -- --yolo                    # Auto-accept mode\n"
+                "    headroom wrap crush -- run \"fix the bug\"         # Non-interactive run"
+            ),
+        ),
+        WrapTarget(
+            name="crush-dev-local",
+            binary="crush-dev-local",
+            install_hint="Install crush-dev-local (or crush-love-dev) into PATH.",
+            env_vars=(
+                EnvVar("OPENAI_BASE_URL", "openai_v1"),
+                EnvVar("OPENAI_API_BASE", "openai_v1", display=False),
+                EnvVar("ANTHROPIC_BASE_URL", "anthropic"),
+                EnvVar("OPENROUTER_BASE_URL", "openai_v1", display=False),
+                EnvVar("DEEPSEEK_BASE_URL", "openai_v1", display=False),
+            ),
+            help_text=(
+                "Launch crush-dev-local (8b.is ULTRA INSTINCT local dev harness) through HeadroomZ proxy.\n"
+                "\n"
+                "\b\n"
+                "Routes local Crush dev harness sessions (OPENAI_BASE_URL, ANTHROPIC_BASE_URL,\n"
+                "DEEPSEEK_BASE_URL) through HeadroomZ with full MCP & project attribution.\n"
+                "\n"
+                "\b\n"
+                "Examples:\n"
+                "    headroom wrap crush-dev-local                    # Start proxy + crush-dev-local\n"
+                "    headroom wrap crush-dev-local -- --instinct      # ULTRA INSTINCT mode\n"
+                "    headroom wrap crush-dev-local -- --ultra         # Ultra-performance mode"
+            ),
+        ),
+        WrapTarget(
+            name="codewhale",
+            binary="codewhale",
+            install_hint="Install CodeWhale / Whale: brew install whale (or link codewhale -> whale).",
+            env_vars=(
+                EnvVar("DEEPSEEK_BASE_URL", "openai_v1"),
+                EnvVar("OPENAI_BASE_URL", "openai_v1"),
+                EnvVar("OPENAI_API_BASE", "openai_v1", display=False),
+                EnvVar("ANTHROPIC_BASE_URL", "anthropic"),
+            ),
+            help_text=(
+                "Launch CodeWhale (8b.is / DeepSeek-native Whale agent) through HeadroomZ proxy.\n"
+                "\n"
+                "\b\n"
+                "Sets DEEPSEEK_BASE_URL, OPENAI_BASE_URL, and ANTHROPIC_BASE_URL to route\n"
+                "CodeWhale's inference traffic through HeadroomZ.\n"
+                "\n"
+                "\b\n"
+                "Examples:\n"
+                "    headroom wrap codewhale                          # Start proxy + codewhale\n"
+                "    headroom wrap codewhale -- exec \"fix the bug\"    # Non-interactive prompt\n"
+                "    headroom wrap codewhale -- -m deepseek-v4-pro    # Select model"
+            ),
+        ),
     )
 }
 

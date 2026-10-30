@@ -252,6 +252,12 @@ _AGENT_LABELS: dict[str, str] = {
     "aider": "Aider",
     "zed": "Zed",
     "opencode": "OpenCode",
+    "crush": "Crush",
+    "crush-dev-local": "Crush Dev Local",
+    "crush-love-dev": "Crush Dev Local",
+    "codewhale": "CodeWhale",
+    "whale": "CodeWhale",
+    "ultrawhale": "CodeWhale",
     "openclaw": "OpenClaw",
     "gemini": "Gemini",
     "google": "Gemini",
@@ -285,6 +291,10 @@ def _normalize_agent_key(raw: Any) -> str | None:
         return "codex"
     if value in {"github-copilot", "copilot"}:
         return "copilot"
+    if value in {"crush-love-dev", "crush-dev-local"}:
+        return "crush-dev-local"
+    if value in {"whale", "ultrawhale", "codewhale"}:
+        return "codewhale"
     if value in {"google", "vertex-google", "vertex:google"}:
         return "gemini"
     return value

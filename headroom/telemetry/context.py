@@ -32,6 +32,11 @@ _KNOWN_WRAP_AGENTS = frozenset(
         "omp",
         "openclaw",
         "opencode",
+        "crush",
+        "crush_dev_local",
+        "crush-dev-local",
+        "codewhale",
+        "whale",
     }
 )
 

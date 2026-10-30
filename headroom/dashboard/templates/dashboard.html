@@ -3,14 +3,14 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Headroom Dashboard</title>
+    <title>8b.HeadroomZ — Sovereign Constellation Telemetry (8b.is · pocoo.vaked.dev)</title>
+    <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='14' fill='%23070312'/%3E%3Ccircle cx='32' cy='32' r='22' fill='none' stroke='%237a5cff' stroke-width='2' stroke-dasharray='4 3'/%3E%3Ccircle cx='32' cy='32' r='11' fill='%23ffb01f'/%3E%3Ccircle cx='48' cy='18' r='4.5' fill='%23dfe6f5'/%3E%3C/svg%3E">
     <script src="/dashboard/static/tailwind.min.js"></script>
     <script src="/dashboard/static/alpine.min.js" defer></script>
     <script>
         (function() {
             const saved = localStorage.getItem('headroom-theme');
-            const prefersDark = window.matchMedia('(prefers-color-scheme: dark)').matches;
-            if (saved === 'light' || (!saved && !prefersDark)) {
+            if (saved === 'light') {
                 document.documentElement.classList.remove('dark');
             } else {
                 document.documentElement.classList.add('dark');
@@ -25,52 +25,147 @@
                     colors: {
                         surface: 'var(--color-surface)',
                         border: 'var(--color-border)',
-                        accent: '#22d3ee',
+                        accent: '#ffb01f',
+                        sun: '#ffb01f',
+                        ki: '#ffd400',
+                        ember: '#ff7a00',
+                        nebula: '#7a5cff',
+                        saiyan: '#1e7fff',
+                        moon: '#dfe6f5',
                     }
                 }
             }
         }
     </script>
     <style>
+        /* 8b.is · pocoo.vaked.dev — Sun · Moon · Milky Way (the zeno palette) */
         :root {
-            --bg: #f9fafb;
+            --space: #070312;
+            --panel: #0e0821;
+            --panel-2: #150c2e;
+            --ink: #ece9ff;
+            --dim: #9d93c9;
+            --faint: #6b5f96;
+            --sun: #ffb01f;
+            --ki: #ffd400;
+            --ember: #ff7a00;
+            --moon: #dfe6f5;
+            --nebula: #7a5cff;
+            --magenta: #c04ae0;
+            --dragon: #e63946;
+            --saiyan: #1e7fff;
+            --line: rgba(157, 147, 201, 0.22);
+
+            --bg: #f6f4ff;
             --color-surface: #ffffff;
-            --color-border: #e5e7eb;
-            --card-alt-bg: #f3f4f6;
+            --color-border: rgba(107, 95, 150, 0.24);
+            --card-alt-bg: #efeaff;
             --diff-before-header: #fff5f5;
             --diff-before-body: #fef2f2;
             --diff-after-header: #f0fdf4;
             --diff-after-body: #f0fdf4;
-            --ttl-card-bg: linear-gradient(180deg, rgba(34,211,238,0.10), rgba(224,249,253,0.90));
+            --ttl-card-bg: linear-gradient(180deg, rgba(255,176,31,0.12), rgba(122,92,255,0.10));
         }
         html.dark {
-            --bg: #0f0f0f;
-            --color-surface: #1a1a1a;
-            --color-border: #2a2a2a;
-            --card-alt-bg: #141414;
-            --diff-before-header: #1a0808;
-            --diff-before-body: #120606;
-            --diff-after-header: #081a08;
-            --diff-after-body: #0a120a;
-            --ttl-card-bg: linear-gradient(180deg, rgba(34,211,238,0.10), rgba(12,16,22,0.88));
+            --bg: #070312;
+            --color-surface: #0e0821;
+            --color-border: rgba(157, 147, 201, 0.22);
+            --card-alt-bg: #150c2e;
+            --diff-before-header: #220918;
+            --diff-before-body: #160612;
+            --diff-after-header: #081e1c;
+            --diff-after-body: #061414;
+            --ttl-card-bg: linear-gradient(180deg, rgba(255,176,31,0.14), rgba(21,12,46,0.92));
         }
-        body { background: var(--bg); }
-        /* Accessibility: visible keyboard focus on every operable element (WCAG 2.4.7 / 2.4.11) */
-        :focus-visible { outline: 2px solid #22d3ee; outline-offset: 2px; border-radius: 4px; }
-        html:not(.dark) :focus-visible { outline-color: #0e7490; }
+        body {
+            background-color: var(--bg);
+            font-family: ui-monospace, "SF Mono", "JetBrains Mono", Menlo, Monaco, Consolas, monospace;
+            padding-bottom: 76px;
+        }
+        html.dark body {
+            background-image:
+                radial-gradient(ellipse 80% 50% at 50% -10%, rgba(122, 92, 255, 0.22), transparent 70%),
+                radial-gradient(ellipse 60% 45% at 85% 15%, rgba(255, 176, 31, 0.10), transparent 65%),
+                radial-gradient(ellipse 70% 55% at 15% 85%, rgba(192, 74, 224, 0.10), transparent 70%),
+                linear-gradient(180deg, #070312 0%, #150c2e 55%, #070312 100%);
+            background-attachment: fixed;
+            color: var(--ink);
+        }
+        /* Accessibility: visible keyboard focus in --ki (#ffd400) per 8b.is DESIGN.md */
+        :focus-visible { outline: 2px solid #ffd400; outline-offset: 2px; border-radius: 6px; }
+        html:not(.dark) :focus-visible { outline-color: #7a5cff; }
         [role="button"]:focus-visible { outline-offset: -2px; }
         .sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0,0,0,0); white-space: nowrap; border: 0; }
         @media (prefers-reduced-motion: reduce) {
-            .pulse-live { animation: none; }
+            .pulse-live, .hud-eq-bar, .orbit-spin { animation: none !important; }
             #feed-container { scroll-behavior: auto; }
             .transition-colors, .transition-opacity, [x-transition] { transition: none !important; }
         }
-        .sparkline { stroke: #22d3ee; stroke-width: 1.5; fill: none; }
+        .sparkline { stroke: #ffb01f; stroke-width: 1.75; fill: none; }
         .sparkline-area { fill: url(#sparkline-gradient); }
-        .trend-line { stroke: #22d3ee; stroke-width: 2; fill: none; }
+        .trend-line { stroke: #ffb01f; stroke-width: 2; fill: none; }
         .trend-area { fill: url(#trend-gradient); }
-        @keyframes pulse-subtle { 0%, 100% { opacity: 1; } 50% { opacity: 0.7; } }
+        @keyframes pulse-subtle { 0%, 100% { opacity: 1; } 50% { opacity: 0.65; } }
         .pulse-live { animation: pulse-subtle 2s ease-in-out infinite; }
+        @keyframes orbit-slow { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
+        .orbit-spin { transform-origin: 50% 50%; animation: orbit-slow 24s linear infinite; }
+        .mark-8b {
+            font-family: ui-monospace, "SF Mono", Menlo, monospace;
+            letter-spacing: -0.09em;
+            font-weight: 800;
+        }
+        .sun-pill-active {
+            background: linear-gradient(135deg, #ffd400 0%, #ffb01f 55%, #ff7a00 100%);
+            color: #070312 !important;
+            font-weight: 700;
+            box-shadow: 0 0 18px rgba(255, 176, 31, 0.35);
+        }
+        .agent-chip {
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+            padding: 4px 11px;
+            border-radius: 999px;
+            border: 1px solid rgba(157, 147, 201, 0.26);
+            background: rgba(14, 8, 33, 0.72);
+            font-size: 11px;
+            color: #ece9ff;
+            transition: all 150ms ease;
+        }
+        .agent-chip:hover {
+            border-color: rgba(255, 176, 31, 0.75);
+            transform: translateY(-1px);
+            box-shadow: 0 4px 16px rgba(255, 176, 31, 0.18);
+        }
+        /* pocoo.vaked.dev Constellation HUD Bar */
+        #vaked-hud {
+            position: fixed;
+            bottom: 16px;
+            left: 50%;
+            transform: translateX(-50%);
+            z-index: 9999;
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            padding: 8px 20px;
+            background: rgba(7, 3, 18, 0.92);
+            backdrop-filter: blur(24px) saturate(200%);
+            -webkit-backdrop-filter: blur(24px) saturate(200%);
+            border: 1px solid rgba(255, 176, 31, 0.45);
+            border-radius: 9999px;
+            box-shadow: 0 16px 48px rgba(0, 0, 0, 0.8), 0 0 28px rgba(122, 92, 255, 0.25);
+            font-size: 11px;
+            color: #ece9ff;
+            white-space: nowrap;
+        }
+        .hud-eq { display: flex; align-items: flex-end; gap: 2px; height: 13px; }
+        .hud-eq-bar { width: 2px; background: #ffb01f; border-radius: 1px; animation: eqBounce8b 1.2s ease-in-out infinite alternate; }
+        .hud-eq-bar:nth-child(1) { height: 40%; animation-delay: 0.05s; background: #7a5cff; }
+        .hud-eq-bar:nth-child(2) { height: 95%; animation-delay: 0.30s; background: #ffb01f; }
+        .hud-eq-bar:nth-child(3) { height: 60%; animation-delay: 0.15s; background: #ffd400; }
+        .hud-eq-bar:nth-child(4) { height: 85%; animation-delay: 0.40s; background: #e63946; }
+        .hud-eq-bar:nth-child(5) { height: 55%; animation-delay: 0.20s; background: #1e7fff; }
+        @keyframes eqBounce8b { 0% { height: 20%; } 100% { height: 100%; } }
         #feed-container {
             height: calc(100vh - 57px);
             scroll-behavior: smooth;
@@ -125,25 +220,51 @@
      the R shortcut twice, doubling every request the dashboard makes. -->
 <body class="text-gray-200 min-h-screen" x-data="dashboard()">
     <!-- Header -->
-    <header class="border-b border-border px-6 py-4 flex flex-col gap-3 md:flex-row md:flex-wrap md:items-center md:justify-between">
-        <div class="flex items-center gap-4">
-            <h1 class="text-xl font-semibold tracking-tight">HEADROOM</h1>
-            <span class="text-xs text-gray-500 font-mono" x-text="formatVersion(version)"></span>
+    <header class="border-b border-border px-6 py-4 flex flex-col gap-3 md:flex-row md:flex-wrap md:items-center md:justify-between bg-surface/80 backdrop-blur-md">
+        <div class="flex items-center gap-3.5">
+            <!-- 8b.is · pocoo.vaked.dev Celestial Sun · Moon · Milky Way Sigil -->
+            <div class="relative flex items-center justify-center w-10 h-10 rounded-xl border border-amber-400/40 bg-[#070312] shadow-[0_0_24px_rgba(255,176,31,0.22)]">
+                <svg class="w-8 h-8" viewBox="0 0 48 48" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+                    <circle cx="24" cy="24" r="19" stroke="#7a5cff" stroke-opacity="0.55" stroke-width="1.25" stroke-dasharray="3 3" class="orbit-spin"/>
+                    <ellipse cx="24" cy="24" rx="19" ry="7.5" transform="rotate(-28 24 24)" stroke="#c04ae0" stroke-opacity="0.45" stroke-width="1.1"/>
+                    <circle cx="24" cy="24" r="8.5" fill="url(#zeno-sun-grad)"/>
+                    <circle cx="36.5" cy="13.5" r="3.2" fill="#dfe6f5"/>
+                    <circle cx="11.5" cy="33.5" r="2.2" fill="#1e7fff"/>
+                    <defs>
+                        <linearGradient id="zeno-sun-grad" x1="15" y1="15" x2="33" y2="33" gradientUnits="userSpaceOnUse">
+                            <stop offset="0%" stop-color="#ffd400"/>
+                            <stop offset="55%" stop-color="#ffb01f"/>
+                            <stop offset="100%" stop-color="#ff7a00"/>
+                        </linearGradient>
+                    </defs>
+                </svg>
+            </div>
+            <div>
+                <div class="flex items-baseline gap-2">
+                    <h1 class="text-xl font-bold tracking-tight flex items-baseline">
+                        <span class="mark-8b text-[#ece9ff]">8b</span><span class="mark-8b text-[#ffb01f] mr-1">.</span><span class="tracking-wider text-[#ece9ff]">HEADROOM</span><span class="text-[#ffb01f] font-extrabold">Z</span>
+                    </h1>
+                    <span class="text-xs text-[#9d93c9] font-mono px-1.5 py-0.5 rounded border border-purple-400/25 bg-purple-950/40" x-text="formatVersion(version)"></span>
+                </div>
+                <div class="text-[10px] uppercase tracking-[0.28em] text-[#9d93c9]">
+                    sun · moon · milky way · <a href="https://8b.is" target="_blank" class="text-[#ffb01f] hover:underline">8b.is</a> · <a href="https://pocoo.vaked.dev" target="_blank" class="text-[#dfe6f5] hover:underline">pocoo.vaked.dev</a>
+                </div>
+            </div>
         </div>
         <div class="flex min-w-0 max-w-full flex-col gap-3 md:flex-row md:flex-wrap md:items-center md:gap-6">
             <div class="inline-flex rounded-lg border border-border bg-surface p-1">
                     <button type="button" :aria-pressed="viewMode === 'session'" class="px-3 py-1.5 text-sm rounded-md transition-colors"
-                            :class="viewMode === 'session' ? 'bg-accent text-black' : 'text-gray-400 hover:text-gray-200'"
+                            :class="viewMode === 'session' ? 'sun-pill-active bg-accent text-black' : 'text-gray-400 hover:text-gray-200'"
                             @click="setViewMode('session')">
                         Session
                     </button>
                     <button type="button" :aria-pressed="viewMode === 'lifetime'" class="px-3 py-1.5 text-sm rounded-md transition-colors"
-                            :class="viewMode === 'lifetime' ? 'bg-accent text-black' : 'text-gray-400 hover:text-gray-200'"
+                            :class="viewMode === 'lifetime' ? 'sun-pill-active bg-accent text-black' : 'text-gray-400 hover:text-gray-200'"
                             @click="setViewMode('lifetime')">
                         Lifetime
                     </button>
                     <button type="button" :aria-pressed="viewMode === 'history'" class="px-3 py-1.5 text-sm rounded-md transition-colors"
-                        :class="viewMode === 'history' ? 'bg-accent text-black' : 'text-gray-400 hover:text-gray-200'"
+                        :class="viewMode === 'history' ? 'sun-pill-active bg-accent text-black' : 'text-gray-400 hover:text-gray-200'"
                         @click="setViewMode('history')">
                     Historical
                 </button>
@@ -209,6 +330,46 @@
     </header>
 
     <main class="p-6 max-w-7xl mx-auto">
+        <!-- First-Class Sovereign Harnesses Strip (8b.is Constellation) -->
+        <section class="mb-6 rounded-xl border border-border bg-surface/90 p-3.5 flex flex-col gap-2.5 lg:flex-row lg:items-center lg:justify-between shadow-[0_8px_30px_rgba(7,3,18,0.45)]" data-testid="first-class-agents-strip">
+            <div class="flex items-center gap-2.5">
+                <span class="text-[11px] uppercase tracking-[0.28em] text-[#ffb01f] font-semibold">First-Class Agents</span>
+                <span class="text-xs text-[#9d93c9]">· Native MCP + Context Compression + Project Attribution</span>
+            </div>
+            <div class="flex flex-wrap items-center gap-2">
+                <span class="agent-chip" title="Launch OpenCode through HeadroomZ: headroom wrap opencode">
+                    <span class="w-2 h-2 rounded-full bg-[#ffb01f]"></span>
+                    <strong class="text-[#ece9ff]">opencode</strong>
+                    <code class="text-[10px] text-[#9d93c9]">wrap opencode</code>
+                </span>
+                <span class="agent-chip" title="Launch Charmbracelet Crush through HeadroomZ: headroom wrap crush">
+                    <span class="w-2 h-2 rounded-full bg-[#7a5cff]"></span>
+                    <strong class="text-[#ece9ff]">crush</strong>
+                    <code class="text-[10px] text-[#9d93c9]">wrap crush</code>
+                </span>
+                <span class="agent-chip" title="Launch 8b.is ULTRA INSTINCT local dev harness: headroom wrap crush-dev-local">
+                    <span class="w-2 h-2 rounded-full bg-[#ffd400]"></span>
+                    <strong class="text-[#ffd400]">crush-dev-local</strong>
+                    <code class="text-[10px] text-[#9d93c9]">wrap crush-dev-local</code>
+                </span>
+                <span class="agent-chip" title="Launch DeepSeek-native CodeWhale agent: headroom wrap codewhale">
+                    <span class="w-2 h-2 rounded-full bg-[#1e7fff]"></span>
+                    <strong class="text-[#dfe6f5]">codewhale</strong>
+                    <code class="text-[10px] text-[#9d93c9]">wrap codewhale</code>
+                </span>
+                <span class="agent-chip" title="Launch Claude Code through HeadroomZ: headroom wrap claude">
+                    <span class="w-2 h-2 rounded-full bg-[#c04ae0]"></span>
+                    <strong class="text-[#ece9ff]">claude</strong>
+                    <code class="text-[10px] text-[#9d93c9]">wrap claude</code>
+                </span>
+                <span class="agent-chip" title="Launch Codex CLI through HeadroomZ: headroom wrap codex">
+                    <span class="w-2 h-2 rounded-full bg-[#dfe6f5]"></span>
+                    <strong class="text-[#ece9ff]">codex</strong>
+                    <code class="text-[10px] text-[#9d93c9]">wrap codex</code>
+                </span>
+            </div>
+        </section>
+
         <template x-if="viewMode === 'session'">
             <div data-testid="session-view">
                 <p class="mb-4 text-xs text-gray-500">Current proxy process · runtime counters reset on restart</p>
@@ -2019,15 +2180,37 @@
 
     <!-- Footer -->
     <footer class="border-t border-border px-6 py-4 mt-8">
-        <div class="flex justify-between items-center text-xs text-gray-500">
+        <div class="flex flex-wrap justify-between items-center gap-3 text-xs text-gray-500">
             <div>
-                Press <kbd class="px-1.5 py-0.5 bg-border rounded text-gray-400">R</kbd> to refresh
+                Press <kbd class="px-1.5 py-0.5 bg-border rounded text-gray-400">R</kbd> to refresh · <span class="text-[#9d93c9]">8b.HeadroomZ Sovereign Proxy</span>
             </div>
-            <div>
-                <a href="https://docs.headroomlabs.ai/docs" target="_blank" class="hover:text-gray-300 transition-colors">Documentation</a>
+            <div class="flex items-center gap-4">
+                <a href="https://github.com/8b-is/headroomz" target="_blank" class="hover:text-[#ffb01f] transition-colors">8b-is/headroomz</a>
+                <a href="https://8b.is" target="_blank" class="hover:text-[#ffb01f] transition-colors">8b.is</a>
+                <a href="https://pocoo.vaked.dev" target="_blank" class="hover:text-[#dfe6f5] transition-colors">pocoo.vaked.dev</a>
             </div>
         </div>
     </footer>
+
+    <!-- pocoo.vaked.dev × 8b.is Sovereign Constellation HUD -->
+    <nav id="vaked-hud" aria-label="8b.is Sovereign Constellation HUD">
+        <a href="https://8b.is" target="_blank" class="font-bold tracking-widest text-[#ffb01f] flex items-center gap-2 hover:opacity-90">
+            <span class="w-2 h-2 rounded-full bg-[#ffb01f] shadow-[0_0_10px_#ffb01f] pulse-live"></span>
+            <span>8b.HEADROOMZ</span>
+        </a>
+        <div class="hud-eq" aria-hidden="true">
+            <span class="hud-eq-bar"></span>
+            <span class="hud-eq-bar"></span>
+            <span class="hud-eq-bar"></span>
+            <span class="hud-eq-bar"></span>
+            <span class="hud-eq-bar"></span>
+        </div>
+        <span class="w-px h-3.5 bg-white/20"></span>
+        <span class="text-[#9d93c9] hidden sm:inline">opencode · crush · crush-dev-local · codewhale</span>
+        <span class="w-px h-3.5 bg-white/20 hidden sm:inline"></span>
+        <a href="https://pocoo.vaked.dev" target="_blank" class="text-[#dfe6f5] hover:text-[#ffb01f] transition-colors">pocoo.vaked.dev</a>
+        <a href="https://store.vaked.dev" target="_blank" class="text-[#9d93c9] hover:text-[#ffb01f] transition-colors hidden md:inline">store.vaked.dev</a>
+    </nav>
 
     <script>
         function dashboard() {

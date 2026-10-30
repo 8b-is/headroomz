@@ -158,7 +158,7 @@ class OpencodeRegistrar(MCPRegistrar):
         self._config_path = config_path or opencode_config_path()
 
     def detect(self) -> bool:
-        if shutil.which("opencode"):
+        if shutil.which("opencode") or (Path.home() / ".opencode" / "bin" / "opencode").is_file():
             return True
         return self._config_path.parent.is_dir()
 
