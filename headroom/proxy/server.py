@@ -5942,6 +5942,7 @@ def create_app(config: ProxyConfig | None = None) -> FastAPI:
             "secondary_expert": res.secondary_expert,
             "expert_weights": res.expert_weights,
             "features": res.features,
+            "certificate": res.certificate,
             "original_lines": res.original_lines,
             "kept_lines": res.kept_lines,
             "dropped_lines": res.dropped_lines,

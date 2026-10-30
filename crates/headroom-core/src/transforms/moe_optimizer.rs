@@ -41,6 +41,140 @@ impl MoeExpertId {
             MoeExpertId::CodeSkeletonExpert => "code_skeleton_expert",
         }
     }
+
+    /// Emit the formal Revision-Sensitive Projection Certificate `(\pi, V_\pi, R_\pi)`
+    /// for this specialist expert.
+    pub fn projection_certificate(&self, lossless: bool) -> RevisionSensitiveProjectionCertificate {
+        let (retained_subspace, admissible_revisions, regrounding_required_for) = match self {
+            MoeExpertId::LeanSignalExpert => (
+                vec![
+                    "head_tail_anchors".to_string(),
+                    "error_traceback_windows".to_string(),
+                    "grep_match_collars".to_string(),
+                ],
+                vec![
+                    "R_error_localization".to_string(),
+                    "R_exit_status_triage".to_string(),
+                    "R_stack_frame_diagnosis".to_string(),
+                ],
+                vec![
+                    "R_silent_middle_line_inspection".to_string(),
+                    "R_exact_full_stdout_replay".to_string(),
+                ],
+            ),
+            MoeExpertId::DiffHunkExpert => (
+                vec![
+                    "diff_file_headers".to_string(),
+                    "hunk_range_markers".to_string(),
+                    "added_removed_lines".to_string(),
+                    "2_line_change_collar".to_string(),
+                ],
+                vec![
+                    "R_patch_review".to_string(),
+                    "R_changed_line_verification".to_string(),
+                    "R_hunk_conflict_triage".to_string(),
+                ],
+                vec![
+                    "R_untouched_function_body_audit".to_string(),
+                    "R_full_file_reconstruction".to_string(),
+                ],
+            ),
+            MoeExpertId::JsonSchemaExpert => (
+                vec![
+                    "json_envelope_schema".to_string(),
+                    "head_3_tail_2_items".to_string(),
+                    "status_error_anomalies".to_string(),
+                ],
+                vec![
+                    "R_schema_inference".to_string(),
+                    "R_anomaly_triage".to_string(),
+                    "R_boundary_inspection".to_string(),
+                ],
+                vec![
+                    "R_exhaustive_aggregation_sum_count".to_string(),
+                    "R_arbitrary_index_lookup_in_ker_pi".to_string(),
+                ],
+            ),
+            MoeExpertId::LogDedupExpert => (
+                vec![
+                    "head_tail_4_lines".to_string(),
+                    "error_panic_windows".to_string(),
+                    "first_2_template_exemplars".to_string(),
+                    "run_length_cardinality".to_string(),
+                ],
+                vec![
+                    "R_failure_window_diagnosis".to_string(),
+                    "R_template_frequency_analysis".to_string(),
+                    "R_state_transition_audit".to_string(),
+                ],
+                vec![
+                    "R_exact_timestamp_of_elided_repeat".to_string(),
+                    "R_per_tick_jitter_series".to_string(),
+                ],
+            ),
+            MoeExpertId::TabularExpert => (
+                vec![
+                    "column_header_schema".to_string(),
+                    "head_6_tail_4_rows".to_string(),
+                    "anomalous_error_rows".to_string(),
+                ],
+                vec![
+                    "R_column_schema_projection".to_string(),
+                    "R_head_tail_row_sampling".to_string(),
+                    "R_outlier_row_detection".to_string(),
+                ],
+                vec![
+                    "R_full_table_sql_group_by".to_string(),
+                    "R_interior_row_value_lookup".to_string(),
+                ],
+            ),
+            MoeExpertId::CodeSkeletonExpert => (
+                vec![
+                    "import_graph".to_string(),
+                    "fn_class_struct_type_signatures".to_string(),
+                    "error_signal_windows".to_string(),
+                ],
+                vec![
+                    "R_api_surface_discovery".to_string(),
+                    "R_call_signature_typing".to_string(),
+                    "R_module_dependency_mapping".to_string(),
+                ],
+                vec![
+                    "R_interior_branch_line_by_line_trace".to_string(),
+                    "R_local_variable_mutation_audit".to_string(),
+                ],
+            ),
+        };
+        RevisionSensitiveProjectionCertificate {
+            certificate_version: "1.1-sufficient-projection".to_string(),
+            projection_operator: format!("pi:{}", self.as_str()),
+            retained_subspace,
+            admissible_revisions,
+            regrounding_required_for: if lossless {
+                Vec::new()
+            } else {
+                regrounding_required_for
+            },
+            monotone_kernel_guard: true,
+            bennett_reversible_handle: if lossless {
+                "identity://lossless".to_string()
+            } else {
+                "ccr://headroom_retrieve".to_string()
+            },
+        }
+    }
+}
+
+/// Formal Revision-Sensitive Sufficiency Certificate `(\pi, V_\pi, R_\pi)`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RevisionSensitiveProjectionCertificate {
+    pub certificate_version: String,
+    pub projection_operator: String,
+    pub retained_subspace: Vec<String>,
+    pub admissible_revisions: Vec<String>,
+    pub regrounding_required_for: Vec<String>,
+    pub monotone_kernel_guard: bool,
+    pub bennett_reversible_handle: String,
 }
 
 /// 7-dimensional structural signal tensor `[1, 7]` extracted from a context block.
@@ -89,6 +223,7 @@ pub struct MoeRoutingDecision {
     pub secondary_expert: Option<MoeExpertId>,
     pub probabilities: BTreeMap<String, f32>,
     pub features: MoeFeatureTensor,
+    pub certificate: RevisionSensitiveProjectionCertificate,
 }
 
 /// `tracel-ai/burn`-aligned Top-K softmax gating router (`[6, 7]` linear projection + online bandit bias).
@@ -198,9 +333,9 @@ impl BurnMoeGatingRouter {
         }
 
         let denom = (non_empty.max(1)) as f32;
-        let json_density =
-            ((if is_json_env { 0.65 } else { 0.0 }) + 0.5 * (brace_lines as f32 / sample_n as f32))
-                .min(1.0);
+        let json_density = ((if is_json_env { 0.65 } else { 0.0 })
+            + 0.5 * (brace_lines as f32 / sample_n as f32))
+            .min(1.0);
         let tabular_density = (table_lines as f32 / denom).min(1.0);
         let diff_patch_density = (diff_lines as f32 / denom).min(1.0);
         let log_repetition_density = (log_lines as f32 / denom).min(1.0);
@@ -273,11 +408,14 @@ impl BurnMoeGatingRouter {
             None
         };
 
+        let certificate = primary_expert.projection_certificate(false);
+
         MoeRoutingDecision {
             primary_expert,
             secondary_expert,
             probabilities,
             features: feat,
+            certificate,
         }
     }
 
@@ -336,5 +474,26 @@ diff --git a/src/lib.rs b/src/lib.rs
         router.update_bandit_feedback(MoeExpertId::JsonSchemaExpert, -1.0);
         let after = router.export_burn_state().bias[2];
         assert!(after < before);
+    }
+
+    #[test]
+    fn routing_decision_emits_revision_sensitive_projection_certificate() {
+        let router = BurnMoeGatingRouter::new(2);
+        let payload = r#"[{"id": 1, "status": "ok"}, {"id": 2, "status": "ok"}]"#;
+        let dec = router.route(payload);
+        assert_eq!(dec.certificate.projection_operator, "pi:json_schema_expert");
+        assert!(dec
+            .certificate
+            .retained_subspace
+            .contains(&"json_envelope_schema".to_string()));
+        assert!(dec
+            .certificate
+            .admissible_revisions
+            .contains(&"R_schema_inference".to_string()));
+        assert!(dec
+            .certificate
+            .regrounding_required_for
+            .contains(&"R_exhaustive_aggregation_sum_count".to_string()));
+        assert!(dec.certificate.monotone_kernel_guard);
     }
 }

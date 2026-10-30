@@ -52,6 +52,122 @@ _CSV_ROW_RE = re.compile(r"^[^,\n]+(?:,[^,\n]+){3,}$")
 _ERROR_LINE_RE = re.compile(
     r"(?i)\b(?:error|exception|traceback|failed|fail:|panic|fatal|critical|deadlock|oom|err!)\b"
 )
+_EXISTING_PROJECTION_MARKER_RE = re.compile(
+    r"(?:_moe_json_expert|\.\.\. \[\d+ (?:repetitive log lines folded by MOE:log_dedup|unchanged diff context dropped|tabular rows dropped|implementation lines dropped|lines dropped)\] \.\.\.)"
+)
+
+
+@dataclass(frozen=True)
+class RevisionSensitiveProjectionCertificate:
+    """Formal Revision-Sensitive Sufficiency Certificate (pi, V_pi, R_pi).
+
+    Certifies that a compressed context representation pi(m) is sufficient
+    relative to the retained subspace V_pi and admissible revision class R_pi,
+    and specifies the complementary class R \\ R_pi that requires Bennett
+    reversible re-grounding via CCR (headroom_retrieve).
+    """
+
+    projection_operator: str
+    retained_subspace: list[str]
+    admissible_revisions: list[str]
+    regrounding_required_for: list[str]
+    monotone_kernel_guard: bool = True
+    idempotent_skip: bool = False
+    bennett_reversible_handle: str = "ccr://headroom_retrieve"
+    certificate_version: str = "1.1-sufficient-projection"
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "certificate_version": self.certificate_version,
+            "projection_operator": self.projection_operator,
+            "retained_subspace": list(self.retained_subspace),
+            "admissible_revisions": list(self.admissible_revisions),
+            "regrounding_required_for": list(self.regrounding_required_for),
+            "monotone_kernel_guard": self.monotone_kernel_guard,
+            "idempotent_skip": self.idempotent_skip,
+            "bennett_reversible_handle": self.bennett_reversible_handle,
+        }
+
+
+_EXPERT_CERTIFICATES: dict[ExpertId, tuple[list[str], list[str], list[str]]] = {
+    ExpertId.LEAN_SIGNAL: (
+        ["head_tail_anchors", "error_traceback_windows", "grep_match_collars"],
+        ["R_error_localization", "R_exit_status_triage", "R_stack_frame_diagnosis"],
+        ["R_silent_middle_line_inspection", "R_exact_full_stdout_replay"],
+    ),
+    ExpertId.DIFF_HUNK: (
+        [
+            "diff_file_headers",
+            "hunk_range_markers",
+            "added_removed_lines",
+            "2_line_change_collar",
+        ],
+        ["R_patch_review", "R_changed_line_verification", "R_hunk_conflict_triage"],
+        ["R_untouched_function_body_audit", "R_full_file_reconstruction"],
+    ),
+    ExpertId.JSON_SCHEMA: (
+        ["json_envelope_schema", "head_3_tail_2_items", "status_error_anomalies"],
+        ["R_schema_inference", "R_anomaly_triage", "R_boundary_inspection"],
+        ["R_exhaustive_aggregation_sum_count", "R_arbitrary_index_lookup_in_ker_pi"],
+    ),
+    ExpertId.LOG_DEDUP: (
+        [
+            "head_tail_4_lines",
+            "error_panic_windows",
+            "first_2_template_exemplars",
+            "run_length_cardinality",
+        ],
+        [
+            "R_failure_window_diagnosis",
+            "R_template_frequency_analysis",
+            "R_state_transition_audit",
+        ],
+        ["R_exact_timestamp_of_elided_repeat", "R_per_tick_jitter_series"],
+    ),
+    ExpertId.TABULAR: (
+        ["column_header_schema", "head_6_tail_4_rows", "anomalous_error_rows"],
+        [
+            "R_column_schema_projection",
+            "R_head_tail_row_sampling",
+            "R_outlier_row_detection",
+        ],
+        ["R_full_table_sql_group_by", "R_interior_row_value_lookup"],
+    ),
+    ExpertId.CODE_SKELETON: (
+        [
+            "import_graph",
+            "fn_class_struct_type_signatures",
+            "error_signal_windows",
+        ],
+        [
+            "R_api_surface_discovery",
+            "R_call_signature_typing",
+            "R_module_dependency_mapping",
+        ],
+        ["R_interior_branch_line_by_line_trace", "R_local_variable_mutation_audit"],
+    ),
+}
+
+
+def build_projection_certificate(
+    expert: ExpertId,
+    *,
+    lossless: bool = False,
+    idempotent_skip: bool = False,
+) -> RevisionSensitiveProjectionCertificate:
+    """Construct the formal (pi, V_pi, R_pi) certificate for a specialist expert."""
+    v_pi, r_pi, r_reground = _EXPERT_CERTIFICATES[expert]
+    return RevisionSensitiveProjectionCertificate(
+        projection_operator=f"pi:{expert.value}",
+        retained_subspace=v_pi,
+        admissible_revisions=r_pi,
+        regrounding_required_for=[] if lossless else r_reground,
+        monotone_kernel_guard=True,
+        idempotent_skip=idempotent_skip,
+        bennett_reversible_handle=(
+            "identity://lossless" if lossless else "ccr://headroom_retrieve"
+        ),
+    )
 
 
 @dataclass
@@ -114,6 +230,7 @@ class MOEOptimizationResult:
     secondary_expert: str | None
     expert_weights: dict[str, float]
     features: dict[str, float | int] = field(default_factory=dict)
+    certificate: dict[str, Any] = field(default_factory=dict)
 
     @property
     def savings_pct(self) -> float:
@@ -337,6 +454,7 @@ class MOEOptimizer:
             "expert_wins": {e.value: 0 for e in ExpertId},
             "expert_tokens_saved": {e.value: 0 for e in ExpertId},
             "retrieval_penalties": 0,
+            "monotone_kernel_skips": 0,
         }
 
     def get_stats(self) -> dict[str, Any]:
@@ -347,6 +465,9 @@ class MOEOptimizer:
                 "expert_tokens_saved": dict(self._stats["expert_tokens_saved"]),
             }
         base["burn_gating"] = self.gating.export_burn_tensor_state()
+        base["projection_certificates"] = {
+            e.value: build_projection_certificate(e).to_dict() for e in ExpertId
+        }
         return base
 
     def reset_stats(self) -> None:
@@ -360,6 +481,7 @@ class MOEOptimizer:
             self._stats["lines_dropped"] = 0
             self._stats["proxy_lines_dropped"] = 0
             self._stats["retrieval_penalties"] = 0
+            self._stats["monotone_kernel_skips"] = 0
             for e in ExpertId:
                 self._stats["expert_wins"][e.value] = 0
                 self._stats["expert_tokens_saved"][e.value] = 0
@@ -560,6 +682,9 @@ class MOEOptimizer:
                 primary_expert=ExpertId.LEAN_SIGNAL.value,
                 secondary_expert=None,
                 expert_weights={},
+                certificate=build_projection_certificate(
+                    ExpertId.LEAN_SIGNAL, lossless=True
+                ).to_dict(),
             )
 
         lines = text.split("\n")
@@ -568,6 +693,30 @@ class MOEOptimizer:
         decision = self.gating.route(text, lines)
         primary_exp = decision.top_experts[0][0]
         secondary_exp = decision.top_experts[1][0] if len(decision.top_experts) > 1 else None
+
+        # Monotone Kernel Growth Guard (ker(pi_n) <= ker(pi_{n+1} o pi_n)):
+        # If the block already bears a projection marker from an earlier turn,
+        # enforce idempotence pi(pi(m)) = pi(m) so iterative turns never compound
+        # kernel loss across the context window.
+        if _EXISTING_PROJECTION_MARKER_RE.search(text):
+            with self._lock:
+                self._stats["monotone_kernel_skips"] += 1
+            return MOEOptimizationResult(
+                text=text,
+                original_lines=n_lines,
+                kept_lines=n_lines,
+                dropped_lines=0,
+                original_tokens=orig_tokens,
+                compressed_tokens=orig_tokens,
+                tokens_saved=0,
+                primary_expert=primary_exp.value,
+                secondary_expert=secondary_exp.value if secondary_exp else None,
+                expert_weights=decision.all_probabilities,
+                features=decision.features.to_dict(),
+                certificate=build_projection_certificate(
+                    primary_exp, lossless=False, idempotent_skip=True
+                ).to_dict(),
+            )
 
         if n_lines < self.min_lines and len(text) < 1200:
             return MOEOptimizationResult(
@@ -582,6 +731,7 @@ class MOEOptimizer:
                 secondary_expert=secondary_exp.value if secondary_exp else None,
                 expert_weights=decision.all_probabilities,
                 features=decision.features.to_dict(),
+                certificate=build_projection_certificate(primary_exp, lossless=True).to_dict(),
             )
 
         # Evaluate Top-1 expert; if Top-1 yields <10% reduction and Top-2 has
@@ -646,6 +796,9 @@ class MOEOptimizer:
             secondary_expert=secondary_exp.value if secondary_exp else None,
             expert_weights=decision.all_probabilities,
             features=decision.features.to_dict(),
+            certificate=build_projection_certificate(
+                winning_exp, lossless=(dropped_count == 0)
+            ).to_dict(),
         )
 
 

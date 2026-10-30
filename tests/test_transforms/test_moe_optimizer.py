@@ -134,3 +134,35 @@ def test_apply_moe_to_messages_updates_proxy_stats() -> None:
     assert stats["proxy_tokens_saved"] > 0
     assert "iroh_mesh" in stats
     assert "burn_gating" in stats
+    assert "projection_certificates" in stats
+
+
+def test_emits_revision_sensitive_projection_certificate() -> None:
+    moe = MOEOptimizer(window_radius=8, top_k=2, min_lines=10)
+    items = [{"id": i, "status": "ok", "latency_ms": 11} for i in range(40)]
+    payload = json.dumps(items, indent=2)
+    res = moe.optimize(payload)
+    cert = res.certificate
+    assert cert["certificate_version"] == "1.1-sufficient-projection"
+    assert cert["projection_operator"] == "pi:json_schema_expert"
+    assert "json_envelope_schema" in cert["retained_subspace"]
+    assert "R_schema_inference" in cert["admissible_revisions"]
+    assert "R_exhaustive_aggregation_sum_count" in cert["regrounding_required_for"]
+    assert cert["monotone_kernel_guard"] is True
+    assert cert["idempotent_skip"] is False
+    assert cert["bennett_reversible_handle"] == "ccr://headroom_retrieve"
+
+
+def test_monotone_kernel_growth_guard_prevents_iterative_reprojection() -> None:
+    moe = MOEOptimizer(window_radius=8, top_k=2, min_lines=10)
+    logs = [f"2026-10-30T12:00:{i % 60:02d} INFO worker={i} heartbeat ok" for i in range(60)]
+    turn_1 = moe.optimize("\n".join(logs))
+    assert turn_1.dropped_lines > 0
+    assert turn_1.certificate["idempotent_skip"] is False
+
+    # Passing the already-projected output into a second turn must be idempotent:
+    turn_2 = moe.optimize(turn_1.text)
+    assert turn_2.text == turn_1.text
+    assert turn_2.dropped_lines == 0
+    assert turn_2.certificate["idempotent_skip"] is True
+    assert moe.get_stats()["monotone_kernel_skips"] >= 1
