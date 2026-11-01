@@ -128,7 +128,7 @@ def _normalized_model_name(model: str | None) -> str:
 def model_prefers_responses_api(model: str | None) -> bool:
     """Return True for OpenAI reasoning models served via /responses."""
     value = _normalized_model_name(model)
-    return value.startswith(("gpt-5", "o1", "o3"))
+    return value.startswith(("gpt-6", "gpt-5", "o1", "o3", "o4"))
 
 
 def copilot_model_from_args(

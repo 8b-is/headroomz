@@ -24,6 +24,7 @@ logger = logging.getLogger(__name__)
 # Order matters - more specific patterns first
 MODEL_PATTERNS: list[tuple[str, str]] = [
     # OpenAI models -> tiktoken
+    (r"^gpt-6", "tiktoken"),
     (r"^gpt-5", "tiktoken"),
     (r"^gpt-4o", "tiktoken"),
     (r"^gpt-4", "tiktoken"),

@@ -73,6 +73,7 @@ _MODEL_ENCODINGS: dict[str, str] = {
     "o4-mini": "o200k_base",
     "gpt-4.1": "o200k_base",
     "gpt-5": "o200k_base",
+    "gpt-6": "o200k_base",
     # GPT-4 and GPT-3.5 use cl100k_base
     "gpt-4": "cl100k_base",
     "gpt-4-turbo": "cl100k_base",

@@ -33,16 +33,27 @@ CJK = "这是一个测试文档，用于验证分词器的差异。" * 30
 @pytest.mark.parametrize(
     ("model", "expected"),
     [
-        # gpt-5 family: the missing entry.
+        # gpt-5 & gpt-6 families (including 5.5, 5.6-sol/terra/luna, 6-astra/sol/luna
+        # verified in ttok 1.0 / token-count-compare).
         ("gpt-5", "o200k_base"),
         ("gpt-5-mini", "o200k_base"),
         ("gpt-5-nano", "o200k_base"),
         ("gpt-5-2025-08-07", "o200k_base"),
+        ("gpt-5.5", "o200k_base"),
+        ("gpt-5.6-sol", "o200k_base"),
+        ("gpt-5.6-terra", "o200k_base"),
+        ("gpt-5.6-luna", "o200k_base"),
+        ("gpt-6", "o200k_base"),
+        ("gpt-6-astra", "o200k_base"),
+        ("gpt-6-sol", "o200k_base"),
+        ("gpt-6-luna", "o200k_base"),
         # Casing must not change the answer.
         ("GPT-4o", "o200k_base"),
         ("GPT-4.1", "o200k_base"),
         ("Gpt-4O-Mini", "o200k_base"),
         ("GPT-5", "o200k_base"),
+        ("GPT-6", "o200k_base"),
+        ("GPT-6-Astra", "o200k_base"),
         ("O4-Mini", "o200k_base"),
         ("GPT-4", "cl100k_base"),
         ("GPT-4-Turbo", "cl100k_base"),
@@ -59,7 +70,23 @@ def test_encoding_resolution(model: str, expected: str) -> None:
     assert get_encoding_for_model(model) == expected
 
 
-@pytest.mark.parametrize("model", ["gpt-5", "GPT-4o", "GPT-4.1"])
+@pytest.mark.parametrize(
+    "model",
+    [
+        "gpt-5",
+        "gpt-5.5",
+        "gpt-5.6-sol",
+        "gpt-5.6-terra",
+        "gpt-5.6-luna",
+        "gpt-6",
+        "gpt-6-astra",
+        "gpt-6-sol",
+        "gpt-6-luna",
+        "GPT-6",
+        "GPT-4o",
+        "GPT-4.1",
+    ],
+)
 def test_cold_cache_uppercase_still_gets_the_right_encoding(model: str) -> None:
     """End-to-end through the registry, with the uppercase spelling resolved first.
 

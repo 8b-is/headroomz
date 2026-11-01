@@ -188,8 +188,11 @@ def get_encoding_for_model(model: str) -> str:
         # which they would otherwise match and be mis-encoded as cl100k_base.
         ("gpt-4.1", "o200k_base"),
         ("gpt-4.5", "o200k_base"),
-        # gpt-5 uses o200k_base. Without this it fell through to the
-        # cl100k_base default, over-counting CJK by ~33%.
+        # gpt-5 and gpt-6 families (including 5.5, 5.6-sol/terra/luna,
+        # 6-astra/sol/luna — see ttok 1.0 / token-count-compare) use o200k_base.
+        # Without this they fall through to the cl100k_base default,
+        # over-counting CJK by ~33%.
+        ("gpt-6", "o200k_base"),
         ("gpt-5", "o200k_base"),
         ("gpt-4-turbo", "cl100k_base"),
         ("gpt-4", "cl100k_base"),
