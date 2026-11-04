@@ -42,11 +42,7 @@ pub fn derive_iroh_node_id(seed: &str) -> String {
 }
 
 /// Create an Iroh content-addressed `bloba...` ticket for `payload`.
-pub fn create_iroh_blob_ticket(
-    node_id: &str,
-    relay_url: &str,
-    payload: &[u8],
-) -> IrohBlobTicket {
+pub fn create_iroh_blob_ticket(node_id: &str, relay_url: &str, payload: &[u8]) -> IrohBlobTicket {
     let blake3_hash = compute_iroh_blake3_cid(payload);
     let ticket_seed = format!("{node_id}:{blake3_hash}:{relay_url}");
     let ticket_digest = blake3::hash(ticket_seed.as_bytes()).to_hex();

@@ -390,7 +390,7 @@ WRAP_TARGETS: dict[str, WrapTarget] = {
                 "\b\n"
                 "Examples:\n"
                 "    headroom wrap codewhale                          # Start proxy + codewhale\n"
-                "    headroom wrap codewhale -- exec \"fix the bug\"    # Non-interactive prompt\n"
+                '    headroom wrap codewhale -- exec "fix the bug"    # Non-interactive prompt\n'
                 "    headroom wrap codewhale -- -m deepseek-v4-pro    # Select model"
             ),
         ),
