@@ -274,7 +274,7 @@ impl BurnMoeGatingRouter {
         let is_json_env = (stripped.starts_with('{') && stripped.ends_with('}'))
             || (stripped.starts_with('[') && stripped.ends_with(']'));
 
-        let sample_n = n_lines.min(400).max(1);
+        let sample_n = n_lines.clamp(1, 400);
         let mut brace_lines = 0usize;
         let mut table_lines = 0usize;
         let mut diff_lines = 0usize;
