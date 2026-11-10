@@ -43,7 +43,7 @@ jobs:
         os: [ubuntu-latest, macos-latest]
 
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@v4
 
       - name: Setup
         uses: ./.github/actions/headroom-e2e-setup

@@ -41,7 +41,7 @@ jobs:
             --description "Security-relevant; exempt from stale triage" \
             --force
 
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@v4
 
       # One issue per ISO week: re-runs and later dispatches reuse it (see the
       # script header). Tested by tests/test_codeql_triage_script.py.
